@@ -393,8 +393,8 @@ class PDF(FPDF):
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
         
-    def cell_utf8(self, w, h, txt, border=0, ln=0, align=''):
-        self.cell(w, h, txt.encode('latin-1', 'replace').decode('latin-1'), border, ln, align)
+    def cell_utf8(self, w, h, txt, border=0, ln=0, align='', fill=False): # CORREÇÃO APLICADA: Adicionado 'fill=False'
+        self.cell(w, h, txt.encode('latin-1', 'replace').decode('latin-1'), border, ln, align, fill) # CORREÇÃO APLICADA: Passado 'fill' para self.cell
 
 def generate_diet_pdf(username, targets, df_plan, final_totals):
 # ... (código da função) ...
@@ -407,7 +407,8 @@ def generate_diet_pdf(username, targets, df_plan, final_totals):
 
     pdf.set_fill_color(220, 220, 220)
     pdf.set_font('Arial', 'B', 9)
-    pdf.cell_utf8(25, 7, 'Calorias', 1, 0, 'C', 1)
+    # A chamada que causou o erro agora funciona pois 'cell_utf8' aceita 7 argumentos:
+    pdf.cell_utf8(25, 7, 'Calorias', 1, 0, 'C', 1) 
     pdf.cell_utf8(25, 7, 'Proteína', 1, 0, 'C', 1)
     pdf.cell_utf8(25, 7, 'Carboidratos', 1, 0, 'C', 1)
     pdf.cell_utf8(25, 7, 'Gordura', 1, 0, 'C', 1)
@@ -648,7 +649,10 @@ def page_planejador_inteligente():
                     )
                 }
                 
-                st.markdown(f"##### 🥣 {meal_name_input} (Meta por refeição: {int(targets['cal'] / targets['num_meals'])} kcal)")
+                # Calcula a meta de calorias por refeição para exibição
+                meal_cal_target = int(targets['cal'] / targets['num_meals'])
+                
+                st.markdown(f"##### 🥣 {meal_name_input} (Meta por refeição: {meal_cal_target} kcal)")
                 
                 # Exibe o editor e armazena o resultado no Session State
                 df_edited = st.data_editor(
@@ -666,11 +670,25 @@ def page_planejador_inteligente():
                 # Recalcula e exibe os macros da refeição atual
                 meal_macros = calculate_macros_from_plan(df_edited, targets['df_foods'])
                 
+                # Feedback visual para a refeição
+                cal_delta = meal_macros['cal'] - meal_cal_target
+                
+                if abs(cal_delta) > meal_cal_target * 0.15 and meal_macros['cal'] > 0: # Delta maior que 15%
+                    delta_text = f"{'+' if cal_delta > 0 else ''}{cal_delta} kcal"
+                    color_style = 'color: #D35400;' if cal_delta > 0 else 'color: #1ABC9C;'
+                else:
+                    delta_text = "OK"
+                    color_style = 'color: #27AE60;'
+
                 # Exibe o total da refeição em uma caixa
                 st.markdown(f"""
-                <div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-top: 10px;'>
+                <div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-top: 10px; background-color: #f9f9f9;'>
                     <h6 style='margin-top:0;'>Total {meal_name_input}</h6>
-                    <small>Cal: {meal_macros['cal']} kcal | Prot: {meal_macros['prot']} g | Carb: {meal_macros['carbs']} g</small>
+                    <small>
+                        Cal: <strong>{meal_macros['cal']} kcal</strong> (<span style='{color_style}'>{delta_text}</span>) | 
+                        Prot: {meal_macros['prot']} g | 
+                        Carb: {meal_macros['carbs']} g
+                    </small>
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -698,42 +716,43 @@ def page_planejador_inteligente():
         def get_delta_color(current, target, is_max=False):
             if current == 0: return "off"
             if is_max: # Sódio (queremos <= target)
-                return "inverse" if current > target else "normal"
+                # Inverte a cor para vermelho quando ultrapassa o limite (current > target)
+                return "inverse" if current > target else "normal" 
             else: # Macros (queremos perto, mas delta positivo geralmente é "normal")
-                return "normal" if current >= target * 0.9 else "inverse" # Avisa se estiver abaixo de 90% da meta
+                # Avisa se estiver abaixo de 90% da meta (inverse)
+                return "normal" if current >= target * 0.9 else "inverse" 
 
         col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6) 
         
         col_c.metric(
             "Calorias Totais", 
             f"{daily_totals['cal']:.0f} kcal", 
-            delta=f"Meta: {targets['cal']}",
+            delta=f"Meta: {targets['cal']} kcal",
             delta_color=get_delta_color(daily_totals['cal'], targets['cal'])
         )
         col_p.metric(
             "Proteína Total", 
             f"{daily_totals['prot']:.1f} g", 
-            delta=f"Meta: {targets['prot']}",
+            delta=f"Meta: {targets['prot']} g",
             delta_color=get_delta_color(daily_totals['prot'], targets['prot'])
         )
         col_ca.metric(
             "Carboidratos Total", 
             f"{daily_totals['carbs']:.1f} g", 
-            delta=f"Meta: {targets['carbs']}",
+            delta=f"Meta: {targets['carbs']} g",
             delta_color=get_delta_color(daily_totals['carbs'], targets['carbs'])
         )
         col_g.metric(
             "Gordura Total", 
             f"{daily_totals['fat']:.1f} g", 
-            delta=f"Meta: {targets['fat']}",
-            # Gordura geralmente tem um limite superior (max), mas vamos usar o alvo como referência
+            delta=f"Meta: {targets['fat']} g",
             delta_color=get_delta_color(daily_totals['fat'], targets['fat']) 
         )
         col_f.metric("Fibra Total", f"{daily_totals['fiber']:.1f} g", delta="Não Alvo")
         col_s.metric(
             "Sódio Total", 
             f"{daily_totals['sodium']:.0f} mg", 
-            delta=f"Máximo: {targets['sodium']}",
+            delta=f"Máximo: {targets['sodium']} mg",
             delta_color=get_delta_color(daily_totals['sodium'], targets['sodium'], is_max=True)
         ) 
 
@@ -747,13 +766,16 @@ def page_planejador_inteligente():
         
         col_pdf, _ = st.columns([0.4, 0.6])
         with col_pdf:
-            st.download_button(
-                label="Exportar Dieta Manual para PDF",
-                data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
-                file_name=f"Dieta_Manual_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                mime="application/pdf",
-                type="primary"
-            )
+            if not st.session_state['final_plan_df'].empty and st.session_state['final_plan_df']['Alimento'].str.strip().any():
+                st.download_button(
+                    label="Exportar Dieta Manual para PDF",
+                    data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
+                    file_name=f"Dieta_Manual_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            else:
+                 st.info("Preencha pelo menos um alimento com gramas para exportar o PDF.")
 
 def page_hidratacao_agua():
 # ... (código da função) ...
