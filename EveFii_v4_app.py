@@ -1,4 +1,4 @@
-# EveFii_v6_app.py - Versão FINAL (Foco em Gramas, Refeições, Edição/Exclusão - SEM INVENTÁRIO)
+# EveFii_v7_app.py - Versão FINAL (Gramas, Refeições, Edição/Exclusão + Avaliação Física)
 
 # Imports
 import streamlit as st
@@ -29,7 +29,7 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
-# 2. Inicialização do Banco de Dados (Tabela 'inventory' removida)
+# 2. Inicialização do Banco de Dados 
 @st.cache_resource
 def init_db():
     conn = get_conn(); cur = conn.cursor()
@@ -46,6 +46,17 @@ def init_db():
             protein REAL, 
             carbs REAL, 
             fat REAL
+        )
+    ''')
+    
+    # Tabela de Métricas Corporais
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS body_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            date TEXT, 
+            weight REAL, 
+            body_fat_perc REAL,
+            waist_circ REAL
         )
     ''')
     
@@ -71,11 +82,10 @@ def verify_user(username, password):
         return user[0] == hash_password(password)
     return False
 
-# 4. Funções de Alimentos (CRUDS - Adição de Edição e Exclusão)
+# 4. Funções de Alimentos (CRUDS - Inalteradas)
 def save_food(name, cal, prot, carb, fat):
     conn = get_conn(); cur = conn.cursor()
     try:
-        # Custo é sempre 0.0, pois o foco é em nutrição e não custo
         cur.execute("INSERT INTO recipes (name, cost, calories, protein, carbs, fat) VALUES (?, 0.0, ?, ?, ?, ?)", 
                     (name, cal, prot, carb, fat))
         conn.commit()
@@ -87,7 +97,6 @@ def save_food(name, cal, prot, carb, fat):
 
 def get_all_foods():
     conn = get_conn(); 
-    # Seleciona o ID para uso na edição/exclusão
     foods = pd.read_sql("SELECT id, name, cost, calories, protein, carbs, fat FROM recipes", conn)
     conn.close()
     return foods
@@ -107,7 +116,6 @@ def update_food(food_id, name, cal, prot, carb, fat):
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        # Integridade pode falhar se o novo nome já existir
         return False
     finally:
         conn.close()
@@ -122,6 +130,34 @@ def delete_food(food_id):
         return False
     finally:
         conn.close()
+
+# 5. Funções de Métricas Corporais (NOVA SEÇÃO)
+def save_body_metric(date, weight, body_fat_perc, waist_circ):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO body_metrics (date, weight, body_fat_perc, waist_circ) VALUES (?, ?, ?, ?)", 
+                    (date, weight, body_fat_perc, waist_circ))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def get_body_metrics():
+    conn = get_conn(); 
+    metrics = pd.read_sql("SELECT date, weight, body_fat_perc, waist_circ FROM body_metrics ORDER BY date DESC", conn)
+    conn.close()
+    
+    if metrics.empty:
+        return metrics
+        
+    # Cálculo da Massa Gorda (MG) e Massa Magra (MM)
+    metrics['date'] = pd.to_datetime(metrics['date'])
+    metrics['Massa Gorda (kg)'] = metrics['weight'] * (metrics['body_fat_perc'] / 100)
+    metrics['Massa Magra (kg)'] = metrics['weight'] - metrics['Massa Gorda (kg)']
+    
+    return metrics
 
 # --- Cálculo da TMB e Macros (LÓGICA INTELIGENTE) - Inalterada ---
 
@@ -165,10 +201,9 @@ def calculate_smart_macros(gender, weight, height, age, activity_level_factor, g
 
 # --- LÓGICA DE OTIMIZAÇÃO POR REFEIÇÃO (Inalterada) ---
 
-def run_optimization(targets, meal_foods):
+def run_optimization(targets, meal_foods, meal_names):
     num_meals = targets['num_meals']
     
-    # Distribui metas por refeição
     meal_targets = {
         'cal': targets['cal'] / num_meals,
         'prot': targets['prot'] / num_meals,
@@ -181,9 +216,10 @@ def run_optimization(targets, meal_foods):
     optimization_failed = False
 
     for i, selected_foods in enumerate(meal_foods):
+        meal_name = meal_names[i] # Nome da refeição
+        
         if not selected_foods:
-            # Garante que refeições vazias sejam consideradas no total de calorias
-            final_plan.append({'Refeição': f"Refeição {i+1}", 'Alimento': 'Nenhum', 'Gramas': 0})
+            final_plan.append({'Refeição': meal_name, 'Alimento': 'Nenhum', 'Gramas': 0})
             continue
 
         df_meal = targets['df_foods'][targets['df_foods']['name'].isin(selected_foods)].set_index('name')
@@ -222,13 +258,13 @@ def run_optimization(targets, meal_foods):
                 if v.varValue > 1 and f"Gramas_Refeicao_{i+1}" in v.name:
                     food_name = v.name.split('_')[-1].replace('_', ' ')
                     final_plan.append({
-                        'Refeição': f"Refeição {i+1}",
+                        'Refeição': meal_name,
                         'Alimento': food_name,
                         'Gramas': round(v.varValue, 1),
                     })
         else:
             optimization_failed = True
-            st.error(f"❌ Otimização Falhou para **Refeição {i+1}**. Não foi possível atingir as metas com os alimentos selecionados.")
+            st.error(f"❌ Otimização Falhou para **{meal_name}**. Não foi possível atingir as metas com os alimentos selecionados.")
             return
 
     # --- 3. Resultado Final ---
@@ -239,9 +275,13 @@ def run_optimization(targets, meal_foods):
         df_final = pd.DataFrame(final_plan)
         
         # Calcula macros totais para exibição
-        total_prot = df_final.apply(lambda row: targets['df_foods'][targets['df_foods']['name'] == row['Alimento'].replace(' ', '_')]['protein'].iloc[0] * (row['Gramas'] / 100) if not df_final.empty else 0, axis=1).sum()
-        total_carbs = df_final.apply(lambda row: targets['df_foods'][targets['df_foods']['name'] == row['Alimento'].replace(' ', '_')]['carbs'].iloc[0] * (row['Gramas'] / 100) if not df_final.empty else 0, axis=1).sum()
-        total_fat = df_final.apply(lambda row: targets['df_foods'][targets['df_foods']['name'] == row['Alimento'].replace(' ', '_')]['fat'].iloc[0] * (row['Gramas'] / 100) if not df_final.empty else 0, axis=1).sum()
+        # Note: Acessamos o DF completo do targets, limpando o nome da variável de decisão.
+        df_foods_lookup = targets['df_foods'].set_index('name')
+        
+        total_prot = df_final.apply(lambda row: df_foods_lookup.loc[row['Alimento'].replace(' ', '_'), 'protein'] * (row['Gramas'] / 100) if row['Alimento'] != 'Nenhum' and row['Alimento'].replace(' ', '_') in df_foods_lookup.index else 0, axis=1).sum()
+        total_carbs = df_final.apply(lambda row: df_foods_lookup.loc[row['Alimento'].replace(' ', '_'), 'carbs'] * (row['Gramas'] / 100) if row['Alimento'] != 'Nenhum' and row['Alimento'].replace(' ', '_') in df_foods_lookup.index else 0, axis=1).sum()
+        total_fat = df_final.apply(lambda row: df_foods_lookup.loc[row['Alimento'].replace(' ', '_'), 'fat'] * (row['Gramas'] / 100) if row['Alimento'] != 'Nenhum' and row['Alimento'].replace(' ', '_') in df_foods_lookup.index else 0, axis=1).sum()
+
 
         col_c, col_p, col_ca, col_g = st.columns(4)
         col_c.metric("Calorias Totais", f"{total_opt_cal:.0f} kcal")
@@ -314,27 +354,41 @@ def page_planejador_inteligente():
         targets = st.session_state['targets']
         
         st.subheader(f"2. Montagem do Plano de Refeições ({targets['num_meals']} Refeições)")
-        st.info("Selecione os alimentos disponíveis para cada refeição.")
-
+        
+        # Inicializa o estado dos nomes das refeições e dos alimentos selecionados
         if 'meal_foods' not in st.session_state or len(st.session_state['meal_foods']) != targets['num_meals']:
             st.session_state['meal_foods'] = [[] for _ in range(targets['num_meals'])]
+        if 'meal_names' not in st.session_state or len(st.session_state['meal_names']) != targets['num_meals']:
+            st.session_state['meal_names'] = [f"Refeição {i+1}" for i in range(targets['num_meals'])]
 
-        meal_names = [f"Refeição {i+1}" for i in range(targets['num_meals'])]
+
         all_food_names = targets['df_foods']['name'].tolist()
         
-        # Interface de seleção de alimentos
-        with st.container():
-            for i, meal_name in enumerate(meal_names):
+        # Interface de personalização do nome e seleção
+        st.markdown("##### Personalize os Nomes e Selecione os Alimentos:")
+        
+        meal_cols = st.columns(targets['num_meals'])
+        
+        for i in range(targets['num_meals']):
+            with meal_cols[i]:
+                # Campo para alterar o nome da refeição
+                st.session_state['meal_names'][i] = st.text_input(
+                    f"Nome da Refeição {i+1}", 
+                    value=st.session_state['meal_names'][i], 
+                    key=f'meal_name_{i}'
+                )
+                
+                # Seleção dos Alimentos
                 st.session_state['meal_foods'][i] = st.multiselect(
-                    f"🍽️ **{meal_name}** - Selecione Alimentos",
+                    f"Alimentos para {st.session_state['meal_names'][i]}",
                     options=all_food_names,
                     default=st.session_state['meal_foods'][i],
                     key=f'multiselect_{i}'
                 )
-
-            st.markdown("---")
-            if st.button("Gerar Dieta Final em Gramas", type="primary"):
-                run_optimization(targets, st.session_state['meal_foods'])
+        
+        st.markdown("---")
+        if st.button("Gerar Dieta Final em Gramas", type="primary"):
+            run_optimization(targets, st.session_state['meal_foods'], st.session_state['meal_names'])
 
 
 def page_receitas():
@@ -346,20 +400,19 @@ def page_receitas():
     # --- 1. Visualização e Seleção para Edição ---
     st.subheader("Alimentos Cadastrados (por 100g)")
     if not df_foods.empty:
-        # Renomeia as colunas para melhor visualização (inclui ID para seleção)
         df_display = df_foods.copy()
         df_display.columns = ['ID', 'Nome', 'Custo (R$)', 'Calorias (kcal)/100g', 'Proteína (g)/100g', 'Carbohidratos (g)/100g', 'Gordura (g)/100g']
         
         st.dataframe(df_display[['ID', 'Nome', 'Calorias (kcal)/100g', 'Proteína (g)/100g', 'Carbohidratos (g)/100g', 'Gordura (g)/100g']], hide_index=True)
         
-        # Seleção para Edição/Exclusão
         st.markdown("---")
         st.subheader("Editar ou Excluir Alimento")
         
+        food_options = {id_: name for id_, name in zip(df_foods['id'], df_foods['name'])}
         food_id_to_edit = st.selectbox(
             "Selecione o ID do alimento para editar/excluir", 
-            options=[None] + df_foods['id'].tolist(),
-            format_func=lambda x: f"ID: {x} - {df_foods[df_foods['id'] == x]['name'].iloc[0]}" if x else "Selecione um ID"
+            options=[None] + list(food_options.keys()),
+            format_func=lambda x: f"ID: {x} - {food_options[x]}" if x else "Selecione um ID"
         )
 
         if food_id_to_edit:
@@ -382,18 +435,18 @@ def page_receitas():
                 with col_save:
                     submitted_edit = st.form_submit_button("Atualizar Alimento", type="primary")
                 with col_delete:
+                    # Usando st.session_state para confirmar exclusão
                     if st.form_submit_button("Excluir Alimento", type="secondary"):
-                        if delete_food(food_id_to_edit):
+                         if delete_food(food_id_to_edit):
                             st.success(f"Alimento '{food_to_edit['name']}' excluído.")
-                            st.session_state['refresh_foods'] = True
                             st.rerun()
-                        else:
+                         else:
                             st.error("Erro ao excluir alimento.")
+
 
                 if submitted_edit:
                     if update_food(food_id_to_edit, nome, calorias, proteina, carboidratos, gordura):
                         st.success(f"Alimento '{nome}' atualizado com sucesso!")
-                        st.session_state['refresh_foods'] = True
                         st.rerun()
                     else:
                         st.error(f"Erro: Não foi possível atualizar. O nome '{nome}' pode já existir.")
@@ -420,12 +473,64 @@ def page_receitas():
         if submitted and nome:
             if save_food(nome, calorias, proteina, carboidratos, gordura):
                 st.success(f"Alimento '{nome}' salvo com sucesso!")
-                st.session_state['refresh_foods'] = True
                 st.rerun()
             else:
                 st.error(f"Erro: O alimento '{nome}' já existe. Por favor, use um nome diferente.")
 
-# A página de inventário foi removida.
+def page_avaliacao_fisica():
+    st.header("🏋️ Avaliação Física e Progresso Corporal")
+    st.info("Monitore seu peso, percentual de gordura e as mudanças na composição corporal.")
+    
+    # --- 1. Formulário de Cadastro de Métrica ---
+    st.subheader("Registrar Nova Métrica")
+    with st.form("new_metric"):
+        date = st.date_input("Data da Avaliação", value=datetime.today())
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            weight = st.number_input("Peso (kg)", min_value=30.0, format="%.1f", value=75.0)
+        with col2:
+            # Porcentagem de Gordura (ex: obtido por bioimpedância ou dobras cutâneas)
+            body_fat_perc = st.number_input("% de Gordura Corporal", min_value=5.0, max_value=50.0, format="%.1f", value=20.0)
+        with col3:
+            waist_circ = st.number_input("Circunferência Cintura (cm)", min_value=50.0, format="%.1f", value=80.0)
+
+        submitted = st.form_submit_button("Salvar Métrica", type="primary")
+        if submitted:
+            date_str = date.strftime('%Y-%m-%d')
+            if save_body_metric(date_str, weight, body_fat_perc, waist_circ):
+                st.success(f"Métrica de {date_str} registrada com sucesso!")
+                st.rerun()
+            else:
+                st.error("Erro ao salvar métrica.")
+    
+    st.markdown("---")
+    
+    # --- 2. Histórico e Análise ---
+    st.subheader("Histórico de Composição Corporal")
+    df_metrics = get_body_metrics()
+    
+    if df_metrics.empty:
+        st.info("Nenhuma métrica registrada ainda. Adicione uma acima!")
+        return
+
+    # Exibe a última avaliação
+    last_metric = df_metrics.iloc[0]
+    st.markdown(f"##### Última Avaliação ({last_metric['date'].strftime('%d/%m/%Y')}):")
+    
+    col_w, col_bf, col_mg, col_mm = st.columns(4)
+    col_w.metric("Peso", f"{last_metric['weight']:.1f} kg")
+    col_bf.metric("% Gordura", f"{last_metric['body_fat_perc']:.1f} %")
+    col_mg.metric("Massa Gorda", f"{last_metric['Massa Gorda (kg)']:.1f} kg")
+    col_mm.metric("Massa Magra", f"{last_metric['Massa Magra (kg)']:.1f} kg")
+    
+    st.markdown("---")
+
+    # Gráficos de Progresso
+    df_metrics = df_metrics.sort_values(by='date')
+    st.line_chart(df_metrics, x='date', y=['weight', 'Massa Magra (kg)', 'Massa Gorda (kg)'])
+    st.line_chart(df_metrics, x='date', y='body_fat_perc')
+
+
 def page_relatorios():
     st.header("📊 Relatórios e Análise de Nutrientes")
     st.info("Gráfico de análise da composição dos alimentos cadastrados.")
@@ -456,18 +561,17 @@ def page_relatorios():
 # --- Login e Roteamento Principal ---
 
 def main_app():
-    # Exibe o usuário logado na sidebar
     st.sidebar.markdown(f"**Usuário Logado:** `{st.session_state.get('username', 'N/A')}`")
     st.sidebar.markdown("---")
     
-    # Dicionário de páginas: 'Inventário' removido
     PAGES = {
         "Planejador Inteligente": page_planejador_inteligente,
+        "Avaliação Física": page_avaliacao_fisica, # Nova página
         "Banco de Alimentos (TACO)": page_receitas, 
         "Relatórios": page_relatorios
     }
 
-    st.sidebar.title("EveFii v6 Completo (Nutrição)")
+    st.sidebar.title("EveFii v7 Completo (Nutrição)")
     selection = st.sidebar.radio("Navegação", list(PAGES.keys()))
     
     st.sidebar.markdown("---")
@@ -479,7 +583,7 @@ def main_app():
     PAGES[selection]()
 
 def show_login():
-    st.title("EveFii v6 — Focado em Nutrição")
+    st.title("EveFii v7 — Focado em Nutrição")
     st.subheader("Faça Login para Continuar")
     
     with st.form("login_form"):
@@ -499,7 +603,7 @@ def show_login():
 
 if __name__ == "__main__":
     
-    st.set_page_config(page_title="EveFii v6 Nutrição", layout="wide")
+    st.set_page_config(page_title="EveFii v7 Nutrição", layout="wide")
     
     init_db()
     
