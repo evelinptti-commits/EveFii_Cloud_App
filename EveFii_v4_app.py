@@ -300,4 +300,83 @@ def page_relatorios():
     df_recipes = get_all_recipes()
     
     if df_recipes.empty:
-        st.warning("
+        st.warning("Cadastre receitas para visualizar a análise.")
+        return
+
+    # --- Criação do Gráfico (Matplotlib) ---
+    fig, ax = plt.subplots()
+    
+    # Seleciona as 10 receitas mais caras
+    top_recipes = df_recipes.sort_values(by='cost', ascending=False).head(10)
+    
+    ax.barh(top_recipes['name'], top_recipes['cost'], color='skyblue')
+    ax.set_xlabel("Custo Estimado (R$)")
+    ax.set_title("Top 10 Receitas Mais Caras")
+    
+    # Exibe o gráfico no Streamlit
+    st.pyplot(fig)
+
+
+# --- Login e Roteamento Principal ---
+
+def main_app():
+    # Exibe o usuário logado na sidebar
+    st.sidebar.markdown(f"**Usuário Logado:** `{st.session_state.get('username', 'N/A')}`")
+    st.sidebar.markdown("---")
+    
+    PAGES = {
+        "Planejador Inteligente": page_planejador_inteligente,
+        "Gestão de Receitas": page_receitas,
+        "Inventário": page_inventario,
+        "Relatórios": page_relatorios
+    }
+
+    st.sidebar.title("EveFii v4 Completo")
+    selection = st.sidebar.radio("Navegação", list(PAGES.keys()))
+    
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Logout", type="secondary"):
+        st.session_state['logged_in'] = False
+        st.session_state.pop('username', None)
+        st.rerun()
+
+    PAGES[selection]()
+
+def show_login():
+    st.title("EveFii v4 — Versão Completa e Inteligente")
+    st.subheader("Faça Login para Continuar")
+    
+    # Uso de st.form para melhor controle do estado do Streamlit
+    with st.form("login_form"):
+        username = st.text_input("Usuário")
+        password = st.text_input("Senha", type='password')
+        login_submitted = st.form_submit_button("Login", type="primary")
+        
+        if login_submitted:
+            if verify_user(username, password):
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = username
+                st.rerun()
+            else:
+                st.error("Usuário ou Senha inválidos. (Padrão: eve / change-me)")
+
+# --- Início da Execução ---
+
+if __name__ == "__main__":
+    
+    st.set_page_config(page_title="EveFii v4 Completo", layout="wide")
+    
+    # Inicializa o banco de dados e o usuário padrão (só roda uma vez por caching)
+    init_db()
+    
+    # Cria o diretório de fotos, se necessário
+    os.makedirs(PHOTOS_DIR, exist_ok=True)
+    
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+
+    if st.session_state['logged_in']:
+        main_app()
+    else:
+        show_login()
+        show_login()
