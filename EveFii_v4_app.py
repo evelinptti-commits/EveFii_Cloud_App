@@ -380,19 +380,54 @@ def run_optimization(targets, meal_foods, meal_names):
         col_f.metric("Fibra Total", f"{total_opt_fiber:.1f} g")
         col_s.metric("Sódio Total", f"{total_opt_sodium:.0f} mg") 
         
-        df_display = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
-        df_display['Gramas'] = df_display['Gramas'].round(0).astype(int).astype(str) + ' g'
-        st.dataframe(df_display, hide_index=True)
-        
-        col_pdf, _ = st.columns([0.4, 0.6])
-        with col_pdf:
-            st.download_button(
-                label="Exportar Dieta para PDF",
-                data=generate_diet_pdf(st.session_state['username'], targets, df_display, st.session_state['final_totals']),
-                file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                mime="application/pdf",
-                type="primary"
-            )
+    # --- INSERINDO O BLOCO DE CORREÇÃO VISUAL E PREPARAÇÃO PARA EDIÇÃO ---
+# 1. Agrupa o resultado da otimização
+df_grouped = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
+# Arredonda e converte para int
+df_grouped['Gramas'] = df_grouped['Gramas'].round(0).astype(int) 
+
+# SALVA O DATAFRAME NA SESSÃO (Necessário para edição e PDF)
+st.session_state['final_plan_df'] = df_grouped
+
+# NOVO BLOCO DE EXIBIÇÃO POR REFEIÇÃO
+st.subheader("3. Plano Alimentar Otimizado")
+st.success("✅ A otimização gerou um plano viável! Role para baixo para a visualização por refeição e para a área de edição.")
+st.markdown("---")
+
+# Pega a ordem das refeições
+refeicoes_ordenadas = df_grouped['Refeição'].unique()
+
+for refeicao in refeicoes_ordenadas:
+    st.markdown(f"#### 🥣 {refeicao}")
+    
+    # Filtra o DataFrame para a refeição atual
+    df_refeicao = df_grouped[df_grouped['Refeição'] == refeicao].set_index('Alimento').copy()
+    
+    # Formata a coluna Gramas apenas para exibição
+    df_refeicao['Quantidade (g)'] = df_refeicao['Gramas'].astype(str) + ' g'
+    
+    # Exibe a tabela
+    st.dataframe(
+        df_refeicao[['Quantidade (g)']],
+        hide_index=False,
+        use_container_width=True,
+    )
+    
+st.markdown("---")
+
+# Atualiza o botão de download para usar o df_grouped (final_plan_df)
+col_pdf, _ = st.columns([0.4, 0.6])
+with col_pdf:
+    st.download_button(
+        label="Exportar Dieta para PDF",
+        # Passa o DataFrame salvo na sessão:
+        data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
+        file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
+
+# -------------------------------------------------------------------------
 
 # --- Funções de Métricas Corporais ---
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
