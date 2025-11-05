@@ -51,32 +51,11 @@ def verify_user(username, password):
 
 # --- Estrutura das Páginas do Aplicativo Completo ---
 
-def page_planejador_inteligente():
-    st.header("🧠 Planejador Inteligente de Refeições (Otimização PuLP)")
-    st.info("Aqui é onde o algoritmo de otimização PuLP irá rodar para criar o plano de refeições mais eficiente.")
-    
-    st.subheader("Simulação de Otimização")
-    # Botão primário para destaque
-    if st.button("Executar Otimização", type="primary"): 
-        with st.spinner("Otimizando plano de refeições..."):
-            # Exemplo de problema PuLP
-            prob = LpProblem("Problema_Simples", LpMaximize)
-            x = LpVariable("Variável_1", 0, 4)
-            y = LpVariable("Variável_2", -1, 1)
-            prob += x + y, "Função_Objetivo"
-            prob += 2*x + y <= 8, "Restrição_1"
-            
-            # Otimização
-            prob.solve(PULP_CBC_CMD()) 
-            
-            if prob.status == 1:
-                st.balloons() # Efeito de sucesso
-                st.success(f"Otimização concluída com sucesso! Resultado PuLP: {prob.objective.value()}.")
-                st.write(f"Variável X: {x.varValue}, Variável Y: {y.varValue}")
-                st.write("Esta seção seria preenchida com o plano de refeições otimizado.")
-            else:
-                st.error("Erro na otimização. Verifique as restrições.")
+# NOVO CÓDIGO para a função page_planejador_inteligente (Prioridade: Saúde/Metas)
+from pulp import LpProblem, LpMinimize, LpVariable, PULP_CBC_CMD, LpStatus, value, lpSum # Adicionei lpSum 
 
+def page_planejador_inteligente():
+    # ... (todo o código que prioriza as metas de saúde)
 def page_receitas():
     st.header("🍳 Gestão de Receitas e Cardápios")
     st.write("Esta página permite adicionar, editar e visualizar as receitas usadas no planejamento.")
