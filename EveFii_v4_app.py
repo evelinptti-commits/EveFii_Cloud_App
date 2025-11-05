@@ -8,7 +8,7 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
-# from pulp import LpProblem, LpMinimize, LpVariable, PULP_CBC_CMD, LpStatus, value, lpSum, const # <--- Desativado
+from pulp import LpProblem, LpMinimize, LpVariable, PULP_CBC_CMD, LpStatus, value, lpSum, const
 import math
 from fpdf import FPDF 
 import io
@@ -267,59 +267,202 @@ def calculate_smart_macros(gender, weight, height, age, activity_level_factor, g
     
     return int(final_cal), target_prot, target_carbs, target_fat, target_sodium
 
-# --- NOVA FUNÇÃO: Cálculo de Macros de um Plano Manual ---
 def calculate_macros_from_plan(df_plan, df_foods):
-    """Calcula os macros totais (Cal, Prot, Carb, Fat, Fiber, Sodium) a partir de um DataFrame de plano de refeição (Alimento, Gramas)."""
+    """Calcula os macros totais (por 100g) de um plano manual/refeição."""
+    if df_plan.empty or df_plan['Gramas'].sum() == 0:
+        return {'cal': 0, 'prot': 0.0, 'carbs': 0.0, 'fat': 0.0, 'fiber': 0.0, 'sodium': 0.0}
+
+    # Remove linhas vazias ou com Gramas=0
+    df_plan = df_plan[df_plan['Gramas'] > 0].copy()
     if df_plan.empty:
         return {'cal': 0, 'prot': 0.0, 'carbs': 0.0, 'fat': 0.0, 'fiber': 0.0, 'sodium': 0.0}
 
-    # Remove linhas com alimento vazio ou gramas nulas/zero
-    df_plan = df_plan[df_plan['Alimento'].notna() & (df_plan['Gramas'].fillna(0) > 0)]
-    
-    if df_plan.empty:
-        return {'cal': 0, 'prot': 0.0, 'carbs': 0.0, 'fat': 0.0, 'fiber': 0.0, 'sodium': 0.0}
+    # Junta o plano com o banco de alimentos (macronutrientes por 100g)
+    df_foods = df_foods.set_index('name')
+    df_merged = df_plan.merge(df_foods[['calories', 'protein', 'carbs', 'fat', 'fiber', 'sodium']], 
+                              left_on='Alimento', right_index=True, how='left')
 
-    # Junta o plano com os dados nutricionais
-    df_merged = pd.merge(
-        df_plan, 
-        df_foods.set_index('name')[['calories', 'protein', 'carbs', 'fat', 'fiber', 'sodium']], 
-        left_on='Alimento', 
-        right_index=True, 
-        how='left'
-    )
-    
-    # Previne NaN em caso de alimentos recém-adicionados e não salvos no DB
-    df_merged = df_merged.fillna(0)
-
-    # Calcula os macros
-    grams_ratio = df_merged['Gramas'] / 100.0
-    
-    total_cal = (df_merged['calories'] * grams_ratio).sum()
-    total_prot = (df_merged['protein'] * grams_ratio).sum()
-    total_carbs = (df_merged['carbs'] * grams_ratio).sum()
-    total_fat = (df_merged['fat'] * grams_ratio).sum()
-    total_fiber = (df_merged['fiber'] * grams_ratio).sum()
-    total_sodium = (df_merged['sodium'] * grams_ratio).sum()
+    # Calcula o total de macros (macro/100g * gramas / 100)
+    df_merged['Cal_Total'] = df_merged['calories'] * (df_merged['Gramas'] / 100)
+    df_merged['Prot_Total'] = df_merged['protein'] * (df_merged['Gramas'] / 100)
+    df_merged['Carbs_Total'] = df_merged['carbs'] * (df_merged['Gramas'] / 100)
+    df_merged['Fat_Total'] = df_merged['fat'] * (df_merged['Gramas'] / 100)
+    df_merged['Fiber_Total'] = df_merged['fiber'] * (df_merged['Gramas'] / 100)
+    df_merged['Sodium_Total'] = df_merged['sodium'] * (df_merged['Gramas'] / 100)
 
     return {
-        'cal': int(total_cal), 
-        'prot': round(total_prot, 1), 
-        'carbs': round(total_carbs, 1), 
-        'fat': round(total_fat, 1),
-        'fiber': round(total_fiber, 1),
-        'sodium': round(total_sodium, 0)
+        'cal': int(df_merged['Cal_Total'].sum()),
+        'prot': df_merged['Prot_Total'].sum(),
+        'carbs': df_merged['Carbs_Total'].sum(),
+        'fat': df_merged['Fat_Total'].sum(),
+        'fiber': df_merged['Fiber_Total'].sum(),
+        'sodium': df_merged['Sodium_Total'].sum()
     }
 
-# def run_optimization(targets, meal_foods, meal_names): # <--- Otimização Desativada (Comentada)
-#     num_meals = targets['num_meals']
-#     meal_targets = {
-# # ... (código da função de otimização) ...
-#     return
+def run_optimization(targets, meal_foods, meal_names):
+    num_meals = targets['num_meals']
+    meal_targets = {
+        'cal': targets['cal'] / num_meals, 'prot': targets['prot'] / num_meals,
+        'carbs': targets['carbs'] / num_meals, 'fat': targets['fat'] / num_meals,
+        'sodium_max': targets['sodium'] / num_meals, 
+    }
 
+    final_plan = []; 
+    total_opt_cal = 0; total_opt_prot = 0; total_opt_carbs = 0; total_opt_fat = 0; total_opt_fiber = 0; total_opt_sodium = 0
+    optimization_failed = False
+
+    for i, selected_foods in enumerate(meal_foods):
+        meal_name = meal_names[i]
+        
+        if not selected_foods:
+            final_plan.append({'Refeição': meal_name, 'Alimento': 'Nenhum', 'Gramas': 0})
+            continue
+
+        df_meal = targets['df_foods'][targets['df_foods']['name'].isin(selected_foods)].set_index('name')
+        if df_meal.empty: continue
+
+        meal_foods_list = df_meal.index.tolist()
+        food_vars = LpVariable.dicts(f"Gramas_Refeicao_{i+1}", meal_foods_list, 0, None, cat=const.LpContinuous)
+        prob = LpProblem(f"Otimizacao_Refeicao_{i+1}", LpMinimize)
+        dev_cal_pos = LpVariable(f"Desvio_Cal_Pos_{i}", 0) 
+        dev_cal_neg = LpVariable(f"Desvio_Cal_Neg_{i}", 0)
+
+        # OBJETIVO: Minimizar o desvio calórico
+        prob += dev_cal_pos + dev_cal_neg, f"Minimizar_Desvio_Calorico_{i}"
+        
+        # RESTRIÇÕES
+        prob += lpSum(df_meal.loc[r, 'calories'] / 100 * food_vars[r] for r in meal_foods_list) + dev_cal_neg - dev_cal_pos == meal_targets['cal'], f"Restricao_Calorias_{i}"
+        prob += lpSum(df_meal.loc[r, 'protein'] / 100 * food_vars[r] for r in meal_foods_list) >= meal_targets['prot'] * 0.95, f"Restricao_Proteina_Min_{i}"
+        prob += lpSum(df_meal.loc[r, 'carbs'] / 100 * food_vars[r] for r in meal_foods_list) >= meal_targets['carbs'] * 0.95, f"Restricao_Carbos_Min_{i}"
+        prob += lpSum(df_meal.loc[r, 'fat'] / 100 * food_vars[r] for r in meal_foods_list) <= meal_targets['fat'] * 1.1, f"Restricao_Gordura_Max_{i}"
+        prob += lpSum(df_meal.loc[r, 'sodium'] / 100 * food_vars[r] for r in meal_foods_list) <= meal_targets['sodium_max'] * 1.05, f"Restricao_Sodio_Max_{i}" 
+        prob += lpSum(food_vars[r] for r in meal_foods_list) >= 10, f"Restricao_Minimo_Geral_{i}"
+        
+        prob.solve(PULP_CBC_CMD())
+        
+        status = LpStatus[prob.status]
+        
+        if status == "Optimal":
+            meal_prot = 0; meal_carbs = 0; meal_fat = 0; meal_fiber = 0; meal_sodium = 0
+            
+            for v in prob.variables():
+                if v.varValue > 1 and f"Gramas_Refeicao_{i+1}" in v.name:
+                    gramas = v.varValue
+                    
+                    # --- CORREÇÃO DO BUG (EXTRAÇÃO DO NOME DO ALIMENTO) ---
+                    # O nome do alimento (a chave) começa no quarto elemento (índice 3)
+                    parts = v.name.split('_')
+                    food_name_parts = parts[3:] 
+                    pulp_key = "_".join(food_name_parts) 
+                    food_name = pulp_key.replace('_', ' ') 
+                    # ---------------------------------------------------
+                    
+                    df_food_val = df_meal.loc[food_name]
+                    meal_prot += df_food_val['protein'] * (gramas / 100)
+                    meal_carbs += df_food_val['carbs'] * (gramas / 100)
+                    meal_fat += df_food_val['fat'] * (gramas / 100)
+                    meal_fiber += df_food_val['fiber'] * (gramas / 100)
+                    meal_sodium += df_food_val['sodium'] * (gramas / 100) 
+                    
+                    final_plan.append({
+                        'Refeição': meal_name,
+                        'Alimento': food_name,
+                        'Gramas': round(gramas, 1),
+                    })
+            
+            meal_cal = value(meal_targets['cal'] - dev_cal_neg + dev_cal_pos)
+            total_opt_cal += meal_cal
+            total_opt_prot += meal_prot
+            total_opt_carbs += meal_carbs
+            total_opt_fat += meal_fat
+            total_opt_fiber += meal_fiber
+            total_opt_sodium += meal_sodium 
+            
+        else:
+            optimization_failed = True
+            error_message = f"❌ Otimização Falhou para **{meal_name}** ({status})."
+            if status == "Infeasible":
+                error_message += " As restrições são muito apertadas (Ex: Sódio Máximo e Proteína Mínima). Tente selecionar alimentos com mais baixo Sódio, ou menos restritivos."
+            elif status == "Unbounded":
+                error_message += " O modelo encontrou uma solução ilimitada. Isso geralmente indica um erro nas restrições."
+            st.error(error_message)
+            return
+
+    if not optimization_failed:
+        df_final = pd.DataFrame(final_plan)
+        
+        st.session_state['final_plan_df'] = df_final
+        st.session_state['final_totals'] = {
+            'cal': int(total_opt_cal), 
+            'prot': total_opt_prot, 
+            'carbs': total_opt_carbs, 
+            'fat': total_opt_fat,
+            'fiber': total_opt_fiber,
+            'sodium': total_opt_sodium 
+        }
+        
+        st.subheader("3. Dieta Final Otimizada (Gramas por Refeição)")
+        st.success("✅ Plano detalhado gerado com sucesso!")
+        
+        col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6) 
+        col_c.metric("Calorias Totais", f"{total_opt_cal:.0f} kcal")
+        col_p.metric("Proteína Total", f"{total_opt_prot:.1f} g")
+        col_ca.metric("Carboidratos Total", f"{total_opt_carbs:.1f} g")
+        col_g.metric("Gordura Total", f"{total_opt_fat:.1f} g")
+        col_f.metric("Fibra Total", f"{total_opt_fiber:.1f} g")
+        col_s.metric("Sódio Total", f"{total_opt_sodium:.0f} mg") 
+        
+    # --- INSERINDO O BLOCO DE CORREÇÃO VISUAL E PREPARAÇÃO PARA EDIÇÃO ---
+# 1. Agrupa o resultado da otimização
+    df_grouped = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
+# Arredonda e converte para int
+    df_grouped['Gramas'] = df_grouped['Gramas'].round(0).astype(int) 
+
+# SALVA O DATAFRAME NA SESSÃO (Necessário para edição e PDF)
+    st.session_state['final_plan_df'] = df_grouped
+
+# NOVO BLOCO DE EXIBIÇÃO POR REFEIÇÃO
+    st.subheader("3. Plano Alimentar Otimizado")
+    st.success("✅ A otimização gerou um plano viável! Role para baixo para a visualização por refeição e para a área de edição.")
+    st.markdown("---")
+
+# Pega a ordem das refeições
+    refeicoes_ordenadas = df_grouped['Refeição'].unique()
+
+    for refeicao in refeicoes_ordenadas:
+        st.markdown(f"#### 🥣 {refeicao}")
+        
+        # Filtra o DataFrame para a refeição atual
+        df_refeicao = df_grouped[df_grouped['Refeição'] == refeicao].set_index('Alimento').copy()
+        
+        # Formata a coluna Gramas apenas para exibição
+        df_refeicao['Quantidade (g)'] = df_refeicao['Gramas'].astype(str) + ' g'
+        
+        # Exibe a tabela
+        st.dataframe(
+            df_refeicao[['Quantidade (g)']],
+            hide_index=False,
+            use_container_width=True,
+        )
+        
+    st.markdown("---")
+
+# Atualiza o botão de download para usar o df_grouped (final_plan_df)
+    col_pdf, _ = st.columns([0.4, 0.6])
+    with col_pdf:
+        st.download_button(
+            label="Exportar Dieta para PDF",
+            # Passa o DataFrame salvo na sessão:
+            data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
+            file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            type="primary"
+        )
+
+# -------------------------------------------------------------------------
 
 # --- Funções de Métricas Corporais ---
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
-# ... (código da função) ...
     h_in = height * 0.3937; n_in = neck * 0.3937; w_in = waist * 0.3937; hip_in = hip * 0.3937
     if gender == 'Masculino':
         try: bf = 495 / (1.0324 - 0.19077 * math.log10(w_in - n_in) + 0.15456 * math.log10(h_in)) - 450
@@ -330,7 +473,6 @@ def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
     return max(5.0, min(50.0, bf))
 
 def calculate_body_fat_jp7(gender, age, sk_chest, sk_triceps, sk_subscap, sk_midax, sk_supra, sk_abdomen, sk_thigh):
-# ... (código da função) ...
     S7SKF = sk_chest + sk_triceps + sk_subscap + sk_midax + sk_supra + sk_abdomen + sk_thigh
     if S7SKF <= 0: return 5.0 
     try:
@@ -358,7 +500,6 @@ def save_uploaded_photo(uploaded_file, user_id):
     return None
 
 def save_body_metric(user_id, date, weight, body_fat_perc, waist_circ, bmi, photo_path): 
-# ... (código da função) ...
     conn = get_conn(); cur = conn.cursor()
     try:
         cur.execute("INSERT INTO body_metrics (user_id, date, weight, body_fat_perc, waist_circ, bmi, photo_path) VALUES (?, ?, ?, ?, ?, ?, ?)", 
@@ -369,7 +510,6 @@ def save_body_metric(user_id, date, weight, body_fat_perc, waist_circ, bmi, phot
     finally: conn.close()
 
 def get_body_metrics(user_id):
-# ... (código da função) ...
     conn = get_conn(); 
     metrics = pd.read_sql("SELECT date, weight, body_fat_perc, waist_circ, bmi, photo_path FROM body_metrics WHERE user_id = ? ORDER BY date DESC", conn, params=(user_id,))
     conn.close()
@@ -382,33 +522,29 @@ def get_body_metrics(user_id):
 # --- Geração de PDF ---
 class PDF(FPDF):
     def header(self):
-# ... (código da função) ...
         self.set_font('Arial', 'B', 15)
         self.cell(0, 10, 'EveFii - Relatório de Nutrição', 0, 1, 'C')
         self.ln(5)
 
     def footer(self):
-# ... (código da função) ...
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
         
-    def cell_utf8(self, w, h, txt, border=0, ln=0, align='', fill=False): # CORREÇÃO APLICADA: Adicionado 'fill=False'
-        self.cell(w, h, txt.encode('latin-1', 'replace').decode('latin-1'), border, ln, align, fill) # CORREÇÃO APLICADA: Passado 'fill' para self.cell
+    def cell_utf8(self, w, h, txt, border=0, ln=0, align=''):
+        self.cell(w, h, txt.encode('latin-1', 'replace').decode('latin-1'), border, ln, align)
 
 def generate_diet_pdf(username, targets, df_plan, final_totals):
-# ... (código da função) ...
     pdf = PDF('P', 'mm', 'A4')
     pdf.add_page()
     
     pdf.set_font('Arial', 'B', 16)
-    pdf.cell_utf8(0, 10, f'Plano de Dieta Manual para {username}', 0, 1)
+    pdf.cell_utf8(0, 10, f'Plano de Dieta Otimizada para {username}', 0, 1)
     pdf.ln(2)
 
     pdf.set_fill_color(220, 220, 220)
     pdf.set_font('Arial', 'B', 9)
-    # A chamada que causou o erro agora funciona pois 'cell_utf8' aceita 7 argumentos:
-    pdf.cell_utf8(25, 7, 'Calorias', 1, 0, 'C', 1) 
+    pdf.cell_utf8(25, 7, 'Calorias', 1, 0, 'C', 1)
     pdf.cell_utf8(25, 7, 'Proteína', 1, 0, 'C', 1)
     pdf.cell_utf8(25, 7, 'Carboidratos', 1, 0, 'C', 1)
     pdf.cell_utf8(25, 7, 'Gordura', 1, 0, 'C', 1)
@@ -438,12 +574,84 @@ def generate_diet_pdf(username, targets, df_plan, final_totals):
     for index, row in df_plan.iterrows():
         pdf.cell_utf8(50, 6, str(row['Refeição']), 1, 0, 'L')
         pdf.cell_utf8(90, 6, str(row['Alimento']), 1, 0, 'L')
-        pdf.cell_utf8(30, 6, f"{row['Gramas']} g", 1, 1, 'R')
+        pdf.cell_utf8(30, 6, str(row['Gramas']), 1, 1, 'R')
         
     return pdf.output(dest='S').encode('latin-1')
 
 def generate_metrics_pdf(username, df_metrics):
-# ... (código da função) ...
+    pdf = PDF('P', 'mm', 'A4')
+    pdf.add_page()
+    
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell_utf8(0, 10, f'Relatório de Evolução Corporal de {username}', 0, 1)
+    pdf.ln(5)
+
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font('Arial', 'B', 10)
+    pdf.cell_utf8(20, 7, 'Data', 1, 0, 'C', 1)
+    pdf.cell_utf8(25, 7, 'Peso (kg)', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, '% Gord.', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Gorda', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Magra', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, 'Cintura', 1, 0, 'C', 1)
+    pdf.cell_utf8(15, 7, 'IMC', 1, 1, 'C', 1)
+
+    pdf.set_font('Arial', '', 8)
+    df_metrics_chrono = df_metrics.sort_values(by='date')
+    
+    for index, row in df_metrics_chrono.iterrows():
+        pdf.cell_utf8(20, 6, row['date'].strftime('%d/%m/%Y'), 1, 0, 'C')
+        pdf.cell_utf8(25, 6, f"{row['weight']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['body_fat_perc']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Gorda (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Magra (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['waist_circ']:.1f} cm", 1, 0, 'R')
+        pdf.cell_utf8(15, 6, f"{row['bmi']:.1f}", 1, 1, 'R')
+        
+    if len(df_metrics_chrono) > 1:
+        first = df_metrics_chrono.iloc[0]
+        last = df_metrics_chrono.iloc[-1]
+        
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell_utf8(0, 10, 'Resumo da Evolução (Total):', 0, 1)
+        
+        def format_diff_pdf(start, end, metric_name, unit):
+            diff = end - start
+            diff_str = f"{'+' if diff > 0 else ''}{diff:.1f} {unit}"
+            if metric_name in ['Peso', '% Gordura', 'Massa Gorda']:
+                color = (0, 100, 0) if diff < 0 else (180, 0, 0)
+            else: 
+                color = (0, 100, 0) if diff > 0 else (180, 0, 0) 
+
+            pdf.set_text_color(*color)
+            pdf.cell_utf8(0, 7, f"De {start:.1f} para {end:.1f} {unit} ({diff_str})", 0, 1)
+            pdf.set_text_color(0, 0, 0) 
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Peso Corporal:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['weight'], last['weight'], 'Peso', 'kg')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, '% Gordura:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['body_fat_perc'], last['body_fat_perc'], '% Gordura', '%')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Gorda:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Gorda (kg)'], last['Massa Gorda (kg)'], 'Massa Gorda', 'kg')
+
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Magra:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Magra (kg)'], last['Massa Magra (kg)'], 'Massa Magra', 'kg')
+
+        
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_metrics_pdf(username, df_metrics):
     pdf = PDF('P', 'mm', 'A4')
     pdf.add_page()
     
@@ -519,7 +727,6 @@ def generate_metrics_pdf(username, df_metrics):
 # --- Funções Específicas da V17 (Hidratação) ---
 
 def calculate_water_goal(weight_kg, age_years):
-# ... (código da função) ...
     """Calcula a meta de ingestão de água em litros com base no peso e idade."""
     if age_years < 18:
         ml_per_kg = 40
@@ -538,6 +745,124 @@ def calculate_water_goal(weight_kg, age_years):
 # --- Estrutura das Páginas ---
 
 def page_planejador_inteligente():
+    user_id = st.session_state['user_id']
+    st.header("🧠 Planejador Inteligente (Refeições e Gramas)")
+    st.info("Otimize seu plano de alimentos em **gramas** para atingir as metas calculadas, respeitando o limite de **Sódio**.")
+    
+    df_foods = get_all_foods(user_id) 
+    
+    if df_foods.empty:
+        st.warning(f"🚨 Por favor, **{st.session_state['username']}**, cadastre alimentos na página 'Banco de Alimentos (TACO)' antes de otimizar.")
+        return
+
+    profile = get_user_profile(user_id)
+    df_metrics = get_body_metrics(user_id)
+    
+    initial_weight = df_metrics.iloc[0]['weight'] if not df_metrics.empty else 75.0
+    initial_gender = profile.get('gender') if profile else 'Masculino'
+    initial_height = int(profile.get('height')) if profile and profile.get('height') else 175
+    initial_age = int(profile.get('age')) if profile and profile.get('age') else 30
+    
+    gender_options = ['Masculino', 'Feminino']
+    gender_index = gender_options.index(initial_gender) if initial_gender in gender_options else 0
+    
+    st.subheader("1. Seus Dados e Objetivo (Persistentes)")
+    with st.form("metas_calc_form_inteligente"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            gender = st.selectbox("Gênero", gender_options, index=gender_index, key='plan_gender_int')
+            weight = st.number_input(
+                "Peso (kg) - Última Métrica", 
+                min_value=30.0, 
+                value=initial_weight, 
+                format="%.1f",
+                key='plan_weight_int',
+                help="Preenchido automaticamente com sua última avaliação física."
+            )
+            goal = st.selectbox("Objetivo", ['Manutenção', 'Déficit Calórico', 'Hipertrofia Muscular'], key='plan_goal_int')
+        with col2:
+            height = st.number_input("Altura (cm)", min_value=100, value=initial_height, key='plan_height_int')
+            age = st.number_input("Idade (anos)", min_value=15, value=initial_age, key='plan_age_int')
+        with col3:
+            activity_level = st.selectbox("Nível de Atividade", list(TDEE_FACTORS.keys()), key='plan_activity_int')
+            num_meals = st.number_input("Número de Refeições/Dia", min_value=2, max_value=6, value=4, key='plan_num_meals_int')
+            
+        submitted_calc = st.form_submit_button("Calcular Metas Diárias", type="primary")
+
+    if submitted_calc:
+        save_user_profile(user_id, gender, height, age)
+        
+        activity_factor = TDEE_FACTORS[activity_level]
+        target_cal, target_prot, target_carbs, target_fat, target_sodium = calculate_smart_macros(
+            gender, weight, height, age, activity_factor, goal
+        )
+        st.session_state['targets'] = {
+            'cal': target_cal, 'prot': target_prot, 'carbs': target_carbs, 'fat': target_fat,
+            'sodium': target_sodium, 
+            'num_meals': num_meals, 'df_foods': df_foods
+        }
+        st.subheader("Suas Metas Diárias Calculadas:")
+        col_c, col_p, col_ca, col_g, col_s = st.columns(5)
+        col_c.metric("Calorias Alvo", f"{target_cal} kcal")
+        col_p.metric("Proteína Alvo", f"{target_prot} g")
+        col_ca.metric("Carboidratos Alvo", f"{target_carbs} g")
+        col_g.metric("Gordura Alvo", f"{target_fat} g")
+        col_s.metric("Sódio Máximo", f"{target_sodium} mg") 
+        st.markdown("---")
+    
+    if 'targets' in st.session_state:
+        targets = st.session_state['targets']
+        st.subheader(f"2. Montagem do Plano de Refeições ({targets['num_meals']} Refeições)")
+        
+        if 'meal_foods' not in st.session_state or len(st.session_state['meal_foods']) != targets['num_meals']:
+            st.session_state['meal_foods'] = [[] for _ in range(targets['num_meals'])]
+        if 'meal_names' not in st.session_state or len(st.session_state['meal_names']) != targets['num_meals']:
+            st.session_state['meal_names'] = [f"Refeição {i+1}" for i in range(targets['num_meals'])]
+
+        all_food_names = targets['df_foods']['name'].tolist()
+        st.markdown("##### Personalize os Nomes e Selecione os Alimentos:")
+        
+        meal_cols = st.columns(targets['num_meals'])
+        
+        for i in range(targets['num_meals']):
+            with meal_cols[i]:
+                st.session_state['meal_names'][i] = st.text_input(
+                    f"Nome da Refeição {i+1}", 
+                    value=st.session_state['meal_names'][i], 
+                    key=f'meal_name_int_{i}'
+                )
+                st.session_state['meal_foods'][i] = st.multiselect(
+                    f"Alimentos para {st.session_state['meal_names'][i]}",
+                    options=all_food_names,
+                    default=st.session_state['meal_foods'][i],
+                    key=f'multiselect_int_{i}'
+                )
+        
+        st.markdown("---")
+        if st.button("Gerar Dieta Final em Gramas", type="primary"):
+            run_optimization(targets, st.session_state['meal_foods'], st.session_state['meal_names'])
+            
+    if 'final_plan_df' in st.session_state and 'final_totals' in st.session_state:
+        st.markdown("---")
+        st.subheader("Download da Dieta Gerada")
+        col_pdf, _ = st.columns([0.4, 0.6])
+        with col_pdf:
+            st.download_button(
+                label="Exportar Dieta para PDF",
+                data=generate_diet_pdf(
+                    st.session_state['username'], 
+                    st.session_state['targets'], 
+                    st.session_state['final_plan_df'].groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index(),
+                    st.session_state['final_totals']
+                ),
+                file_name=f"Dieta_EveFii_Otimizada_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
+
+# --- INÍCIO DA FUNÇÃO DO PLANEJADOR MANUAL COM CORREÇÃO ---
+
+def page_planejador_manual():
     user_id = st.session_state['user_id']
     st.header("✍️ Planejador Manual Reativo (Refeições e Gramas)")
     st.info("Digite as gramas dos alimentos e o sistema mostrará imediatamente seus totais e se você está atingindo as metas.")
@@ -560,50 +885,57 @@ def page_planejador_inteligente():
     gender_index = gender_options.index(initial_gender) if initial_gender in gender_options else 0
     
     st.subheader("1. Seus Dados e Objetivo (Metas Diárias)")
-    with st.form("metas_calc_form"):
+    with st.form("metas_calc_form_manual"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            gender = st.selectbox("Gênero", gender_options, index=gender_index, key='plan_gender')
+            gender = st.selectbox("Gênero", gender_options, index=gender_index, key='plan_gender_man')
             weight = st.number_input(
                 "Peso (kg) - Última Métrica", 
                 min_value=30.0, 
                 value=initial_weight, 
                 format="%.1f",
-                key='plan_weight',
+                key='plan_weight_man',
                 help="Preenchido automaticamente com sua última avaliação física."
             )
-            goal = st.selectbox("Objetivo", ['Manutenção', 'Déficit Calórico', 'Hipertrofia Muscular'], key='plan_goal')
+            goal = st.selectbox("Objetivo", ['Manutenção', 'Déficit Calórico', 'Hipertrofia Muscular'], key='plan_goal_man')
         with col2:
-            height = st.number_input("Altura (cm)", min_value=100, value=initial_height, key='plan_height')
-            age = st.number_input("Idade (anos)", min_value=15, value=initial_age, key='plan_age')
+            height = st.number_input("Altura (cm)", min_value=100, value=initial_height, key='plan_height_man')
+            age = st.number_input("Idade (anos)", min_value=15, value=initial_age, key='plan_age_man')
         with col3:
-            activity_level = st.selectbox("Nível de Atividade", list(TDEE_FACTORS.keys()), key='plan_activity')
-            num_meals = st.number_input("Número de Refeições/Dia", min_value=2, max_value=6, value=4, key='plan_num_meals')
+            activity_level = st.selectbox("Nível de Atividade", list(TDEE_FACTORS.keys()), key='plan_activity_man')
+            num_meals = st.number_input("Número de Refeições/Dia", min_value=2, max_value=6, value=4, key='plan_num_meals_man')
             
         submitted_calc = st.form_submit_button("Calcular Metas Diárias", type="primary")
 
-    if submitted_calc or 'targets' in st.session_state:
+    if submitted_calc or 'targets_man' in st.session_state:
         if submitted_calc:
             save_user_profile(user_id, gender, height, age)
             activity_factor = TDEE_FACTORS[activity_level]
             target_cal, target_prot, target_carbs, target_fat, target_sodium = calculate_smart_macros(
                 gender, weight, height, age, activity_factor, goal
             )
-            st.session_state['targets'] = {
+            st.session_state['targets_man'] = {
                 'cal': target_cal, 'prot': target_prot, 'carbs': target_carbs, 'fat': target_fat,
                 'sodium': target_sodium, 
                 'num_meals': num_meals, 'df_foods': df_foods
             }
             # Inicializa a estrutura de dados do plano manual
-            st.session_state['meal_names'] = [f"Refeição {i+1}" for i in range(num_meals)]
+            st.session_state['meal_names_man'] = [f"Refeição {i+1}" for i in range(num_meals)]
             # Inicializa o plano como um dicionário de DataFrames
             if 'manual_plan' not in st.session_state or len(st.session_state['manual_plan']) != num_meals:
                 st.session_state['manual_plan'] = {
                     f"Refeição {i+1}": pd.DataFrame({'Alimento': [''], 'Gramas': [0]}).astype({'Alimento': 'str', 'Gramas': 'int32'}) 
                     for i in range(num_meals)
                 }
+            elif len(st.session_state['manual_plan']) > num_meals:
+                # Se o número de refeições for reduzido, corta as chaves excedentes do plano manual
+                st.session_state['manual_plan'] = {
+                    k: v for i, (k, v) in enumerate(st.session_state['manual_plan'].items()) 
+                    if i < num_meals
+                }
 
-        targets = st.session_state['targets']
+
+        targets = st.session_state['targets_man']
         st.subheader("Metas Diárias Calculadas:")
         col_c, col_p, col_ca, col_g, col_s = st.columns(5)
         col_c.metric("Calorias Alvo", f"{targets['cal']} kcal")
@@ -622,17 +954,38 @@ def page_planejador_inteligente():
         meal_cols = st.columns(targets['num_meals'])
         
         for i in range(targets['num_meals']):
-            meal_name = st.session_state['meal_names'][i]
+            # 1. Obter a chave/nome ATUAL no dicionário (chave antiga potencial)
+            # Garantir que st.session_state['meal_names_man'] tenha o tamanho correto
+            if i >= len(st.session_state['meal_names_man']):
+                old_meal_key = f"Refeição {i+1}"
+                st.session_state['meal_names_man'].append(old_meal_key)
+            else:
+                old_meal_key = st.session_state['meal_names_man'][i]
             
             with meal_cols[i]:
-                # Permite nomear a refeição
-                meal_name_input = st.text_input(f"Nome Refeição {i+1}", value=meal_name, key=f'meal_name_input_{i}')
-                st.session_state['meal_names'][i] = meal_name_input
-
-                # Data Editor para o plano da refeição
-                df_meal_current = st.session_state['manual_plan'][meal_name]
+                # 2. Obter o nome que o usuário digitou (nova chave potencial)
+                meal_name_input = st.text_input(f"Nome Refeição {i+1}", value=old_meal_key, key=f'meal_name_input_man_{i}')
                 
-                # Streamlit Data Editor
+                # --- CORREÇÃO: Lógica para renomear a chave se o nome mudou ---
+                if meal_name_input != old_meal_key:
+                    if old_meal_key in st.session_state['manual_plan']:
+                        # Renomeia a chave do DataFrame no dicionário
+                        st.session_state['manual_plan'][meal_name_input] = st.session_state['manual_plan'].pop(old_meal_key)
+                        
+                    # Atualiza a lista de nomes que guarda o nome atual
+                    st.session_state['meal_names_man'][i] = meal_name_input
+                
+                # 3. A chave final e correta para uso é o input (current_meal_key)
+                current_meal_key = meal_name_input
+                
+                # Inicializa o DataFrame se a chave for nova (ex: se o número de refeições aumentou)
+                if current_meal_key not in st.session_state['manual_plan']:
+                     st.session_state['manual_plan'][current_meal_key] = pd.DataFrame({'Alimento': [''], 'Gramas': [0]}).astype({'Alimento': 'str', 'Gramas': 'int32'}) 
+
+                # Acessa o DataFrame com a chave CORRETA (o erro estava resolvido ao usar current_meal_key)
+                df_meal_current = st.session_state['manual_plan'][current_meal_key]
+                
+                # Streamlit Data Editor Config
                 editor_config = {
                     'Alimento': st.column_config.SelectboxColumn(
                         "Alimento",
@@ -652,20 +1005,20 @@ def page_planejador_inteligente():
                 # Calcula a meta de calorias por refeição para exibição
                 meal_cal_target = int(targets['cal'] / targets['num_meals'])
                 
-                st.markdown(f"##### 🥣 {meal_name_input} (Meta por refeição: {meal_cal_target} kcal)")
+                st.markdown(f"##### 🥣 {current_meal_key} (Meta por refeição: {meal_cal_target} kcal)")
                 
-                # Exibe o editor e armazena o resultado no Session State
+                # Exibe o editor
                 df_edited = st.data_editor(
                     df_meal_current,
                     column_config=editor_config,
                     num_rows="dynamic",
                     hide_index=True,
                     use_container_width=True,
-                    key=f'editor_{i}'
+                    key=f'editor_man_{i}'
                 )
                 
-                # Atualiza o Session State com o DataFrame editado
-                st.session_state['manual_plan'][meal_name] = df_edited
+                # 4. Atualiza o Session State com o DataFrame editado usando a chave CORRETA
+                st.session_state['manual_plan'][current_meal_key] = df_edited
                 
                 # Recalcula e exibe os macros da refeição atual
                 meal_macros = calculate_macros_from_plan(df_edited, targets['df_foods'])
@@ -683,102 +1036,76 @@ def page_planejador_inteligente():
                 # Exibe o total da refeição em uma caixa
                 st.markdown(f"""
                 <div style='border: 1px solid #ddd; padding: 10px; border-radius: 5px; margin-top: 10px; background-color: #f9f9f9;'>
-                    <h6 style='margin-top:0;'>Total {meal_name_input}</h6>
+                    <h6 style='margin-top:0;'>Total {current_meal_key}</h6>
                     <small>
                         Cal: <strong>{meal_macros['cal']} kcal</strong> (<span style='{color_style}'>{delta_text}</span>) | 
-                        Prot: {meal_macros['prot']} g | 
-                        Carb: {meal_macros['carbs']} g
+                        Prot: {meal_macros['prot']:.1f} g | 
+                        Carb: {meal_macros['carbs']:.1f} g |
+                        Sódio: {meal_macros['sodium']:.0f} mg
                     </small>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 # Adiciona o plano da refeição (com nome da refeição) à lista para cálculo total
-                df_edited['Refeição'] = meal_name_input
+                df_edited['Refeição'] = current_meal_key
                 daily_plan_df_list.append(df_edited.copy())
 
         st.markdown("---")
         
         # --- SEÇÃO 3: Totais Diários e Feedback ---
-        st.subheader("3. Totais Diários e Feedback de Metas")
-        
-        # Combina todos os DataFrames de refeição em um único DataFrame diário
         if daily_plan_df_list:
-            df_daily_plan = pd.concat(daily_plan_df_list, ignore_index=True)
+            df_daily_plan = pd.concat(daily_plan_df_list)
             daily_totals = calculate_macros_from_plan(df_daily_plan, targets['df_foods'])
-        else:
-            df_daily_plan = pd.DataFrame()
-            daily_totals = {'cal': 0, 'prot': 0.0, 'carbs': 0.0, 'fat': 0.0, 'fiber': 0.0, 'sodium': 0.0}
+            
+            st.subheader("3. Totais Diários e Feedback")
+            
+            # Cálculo dos Deltas e cores
+            cal_diff = daily_totals['cal'] - targets['cal']
+            prot_diff = daily_totals['prot'] - targets['prot']
+            carbs_diff = daily_totals['carbs'] - targets['carbs']
+            fat_diff = daily_totals['fat'] - targets['fat']
+            sodium_diff = daily_totals['sodium'] - targets['sodium'] # Negativo deve ser bom ou OK
 
-        st.session_state['final_plan_df'] = df_daily_plan[['Refeição', 'Alimento', 'Gramas']]
-        st.session_state['final_totals'] = daily_totals
-        
-        # Função para determinar a cor do delta (feedback visual)
-        def get_delta_color(current, target, is_max=False):
-            if current == 0: return "off"
-            if is_max: # Sódio (queremos <= target)
-                # Inverte a cor para vermelho quando ultrapassa o limite (current > target)
-                return "inverse" if current > target else "normal" 
-            else: # Macros (queremos perto, mas delta positivo geralmente é "normal")
-                # Avisa se estiver abaixo de 90% da meta (inverse)
-                return "normal" if current >= target * 0.9 else "inverse" 
-
-        col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6) 
-        
-        col_c.metric(
-            "Calorias Totais", 
-            f"{daily_totals['cal']:.0f} kcal", 
-            delta=f"Meta: {targets['cal']} kcal",
-            delta_color=get_delta_color(daily_totals['cal'], targets['cal'])
-        )
-        col_p.metric(
-            "Proteína Total", 
-            f"{daily_totals['prot']:.1f} g", 
-            delta=f"Meta: {targets['prot']} g",
-            delta_color=get_delta_color(daily_totals['prot'], targets['prot'])
-        )
-        col_ca.metric(
-            "Carboidratos Total", 
-            f"{daily_totals['carbs']:.1f} g", 
-            delta=f"Meta: {targets['carbs']} g",
-            delta_color=get_delta_color(daily_totals['carbs'], targets['carbs'])
-        )
-        col_g.metric(
-            "Gordura Total", 
-            f"{daily_totals['fat']:.1f} g", 
-            delta=f"Meta: {targets['fat']} g",
-            delta_color=get_delta_color(daily_totals['fat'], targets['fat']) 
-        )
-        col_f.metric("Fibra Total", f"{daily_totals['fiber']:.1f} g", delta="Não Alvo")
-        col_s.metric(
-            "Sódio Total", 
-            f"{daily_totals['sodium']:.0f} mg", 
-            delta=f"Máximo: {targets['sodium']} mg",
-            delta_color=get_delta_color(daily_totals['sodium'], targets['sodium'], is_max=True)
-        ) 
-
-        st.markdown("---")
-        
-        # Exibe o plano final para conferência
-        st.subheader("Plano Detalhado (Para PDF)")
-        df_display_final = st.session_state['final_plan_df'].copy()
-        df_display_final['Gramas'] = df_display_final['Gramas'].astype(str) + ' g'
-        st.dataframe(df_display_final, hide_index=True, use_container_width=True)
-        
-        col_pdf, _ = st.columns([0.4, 0.6])
-        with col_pdf:
-            if not st.session_state['final_plan_df'].empty and st.session_state['final_plan_df']['Alimento'].str.strip().any():
-                st.download_button(
-                    label="Exportar Dieta Manual para PDF",
-                    data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
-                    file_name=f"Dieta_Manual_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf",
-                    type="primary"
+            col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6)
+            
+            # Função auxiliar para exibir métrica com delta
+            def display_feedback(col, name, total, target, diff, unit, is_max_limit=False):
+                if diff == 0: delta_color = "off"
+                elif is_max_limit: # Sódio e Gordura (Gordura não é estritamente max, mas aqui usamos como)
+                    delta_color = "inverse" if diff < 0 else "normal"
+                elif diff < 0: delta_color = "inverse"
+                else: delta_color = "normal"
+                    
+                col.metric(
+                    f"{name} (Alvo: {target} {unit})",
+                    f"{total:.1f} {unit}",
+                    delta=f"{'+' if diff > 0 else ''}{diff:.1f} {unit}",
+                    delta_color=delta_color if abs(diff) > target * 0.05 else "off" # Ignora pequenos desvios
                 )
-            else:
-                 st.info("Preencha pelo menos um alimento com gramas para exportar o PDF.")
+
+            display_feedback(col_c, "Calorias", daily_totals['cal'], targets['cal'], cal_diff, 'kcal')
+            display_feedback(col_p, "Proteína", daily_totals['prot'], targets['prot'], prot_diff, 'g')
+            display_feedback(col_ca, "Carboidratos", daily_totals['carbs'], targets['carbs'], carbs_diff, 'g')
+            display_feedback(col_g, "Gordura", daily_totals['fat'], targets['fat'], fat_diff, 'g', is_max_limit=True)
+            
+            col_f.metric("Fibra", f"{daily_totals['fiber']:.1f} g", help="Fibra não tem alvo, apenas acompanhamento.")
+            
+            # Sódio é limite máximo
+            col_s.metric(
+                "Sódio", 
+                f"{daily_totals['sodium']:.0f} mg", 
+                delta=f"{'+' if sodium_diff > 0 else ''}{sodium_diff:.0f} mg", 
+                delta_color="normal" if sodium_diff > 0 else "off"
+            )
+
+            st.markdown("---")
+            st.markdown("##### Plano Manual Consolidado (Tabela):")
+            st.dataframe(df_daily_plan.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index(), hide_index=True, use_container_width=True)
+
+# --- FIM DA FUNÇÃO DO PLANEJADOR MANUAL COM CORREÇÃO ---
+
 
 def page_hidratacao_agua():
-# ... (código da função) ...
     user_id = st.session_state['user_id']
     st.header("💧 Calculadora de Hidratação (Água)")
     st.info("Calcule a sua meta diária de ingestão de água com base no seu peso e idade. Lembre-se que é uma estimativa, consulte sempre um profissional.")
@@ -896,7 +1223,6 @@ def page_hidratacao_agua():
 
 
 def page_receitas():
-# ... (código da função) ...
     user_id = st.session_state['user_id']
     st.header("🍚 Banco de Alimentos (TACO) - 100g")
     st.info(f"Gerencie seu banco de alimentos, **{st.session_state['username']}**. Fibra e Sódio são novos campos!")
@@ -998,7 +1324,6 @@ def page_receitas():
                 st.error(f"Erro: O alimento '{nome}' já existe para você. Por favor, use um nome diferente.")
 
 def page_avaliacao_fisica():
-# ... (código da função) ...
     user_id = st.session_state['user_id']
     st.header(f"🏋️ Avaliação Física e Composição Corporal - {st.session_state['username']}")
     st.info("Monitore sua composição corporal e registre sua foto de evolução.")
@@ -1153,7 +1478,6 @@ def page_avaliacao_fisica():
     st.line_chart(df_metrics, x='date', y=['body_fat_perc', 'bmi'])
 
 def page_relatorios():
-# ... (código da função) ...
     user_id = st.session_state['user_id']
     st.header(f"📊 Relatório de Evolução e Análise - {st.session_state['username']}")
     
@@ -1254,16 +1578,16 @@ def page_relatorios():
         df_plot = df_comparison.iloc[0:4][['Meta', 'Otimizado']].copy() 
         fig, ax = plt.subplots(figsize=(8, 4))
         df_plot.plot(kind='bar', ax=ax, rot=0)
-        ax.set_title('Comparação: Metas Diárias vs. Plano Manual (Macros)')
+        ax.set_title('Comparação: Metas Diárias vs. Plano Otimizado (Macros)')
         ax.set_ylabel('Valor (kcal/g)')
         ax.legend(loc='upper right')
         plt.tight_layout()
         st.pyplot(fig)
         
-        st.markdown(f"**Sódio Total Manual:** {finals['sodium']:.0f} mg (Limite Máximo: {targets['sodium']} mg)")
+        st.markdown(f"**Sódio Total Otimizado:** {finals['sodium']:.0f} mg (Limite Máximo: {targets['sodium']} mg)")
 
     else:
-        st.info("Gere um plano de dieta na página 'Planejador Manual' para visualizar esta análise.")
+        st.info("Gere um plano de dieta na página 'Planejador Inteligente' para visualizar esta análise.")
         
     st.markdown("---")
     st.subheader("4. Distribuição de Nutrientes (Banco de Alimentos)")
@@ -1292,7 +1616,6 @@ def page_relatorios():
 # --- Login e Roteamento Principal ---
 
 def main_app():
-# ... (código da função) ...
     if 'user_id' not in st.session_state:
         st.session_state['user_id'] = get_user_id(st.session_state['username'])
         if st.session_state['user_id'] is None:
@@ -1305,7 +1628,8 @@ def main_app():
     st.sidebar.markdown("---")
     
     PAGES = {
-        "Planejador Manual": page_planejador_inteligente, # Nome Alterado
+        "Planejador Inteligente (Otimização)": page_planejador_inteligente, # Existente no arquivo
+        "Planejador Manual Reativo": page_planejador_manual,          # NOVO/CORRIGIDO
         "Avaliação Física": page_avaliacao_fisica,
         "Banco de Alimentos (TACO)": page_receitas, 
         "💧 Hidratação (Água)": page_hidratacao_agua,
@@ -1321,15 +1645,15 @@ def main_app():
         st.session_state.pop('username', None)
         st.session_state.pop('user_id', None)
         st.session_state.pop('targets', None)
+        st.session_state.pop('targets_man', None) # Limpar a sessão do manual também
         st.session_state.pop('final_plan_df', None)
         st.session_state.pop('final_totals', None)
-        st.session_state.pop('manual_plan', None) # Nova chave a limpar
+        st.session_state.pop('manual_plan', None)
         st.rerun()
 
     PAGES[selection]()
 
 def show_login():
-# ... (código da função) ...
     st.title("EveFii v17 — Suporte Multiusuário")
     st.subheader("Faça Login ou Cadastre-se")
     
