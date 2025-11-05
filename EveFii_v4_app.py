@@ -1,4 +1,4 @@
-# EveFii_v4_app.py - Versão FINAL, Completa e Funcional (Foco: Nutrição/Alimentos - SEM CUSTO)
+# EveFii_v4_app.py - Versão FINAL, Completa e Funcional (Cálculo de Metas e Foco em Nutrição/Alimentos)
 
 # Imports
 import streamlit as st
@@ -14,9 +14,17 @@ from pulp import LpProblem, LpMinimize, LpVariable, PULP_CBC_CMD, LpStatus, valu
 DB_PATH = "evefii_v4.db"
 PHOTOS_DIR = "photos" 
 
+# Fatores para cálculo do Gasto Energético Total (GET) / TDEE
+TDEE_FACTORS = {
+    "Sedentário (pouco ou nenhum exercício)": 1.2,
+    "Levemente Ativo (exercício 1-3 dias/semana)": 1.375,
+    "Moderadamente Ativo (exercício 3-5 dias/semana)": 1.55,
+    "Muito Ativo (exercício 6-7 dias/semana)": 1.725,
+    "Extremamente Ativo (treino diário intenso e trabalho físico)": 1.9
+}
+
 # 1. Conexão do Banco de Dados
 def get_conn():
-    # Adicionando check_same_thread=False para compatibilidade com Streamlit
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -26,10 +34,9 @@ def get_conn():
 def init_db():
     conn = get_conn(); cur = conn.cursor()
     
-    # Tabela 1: Usuários (Login)
     cur.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT)')
     
-    # Tabela 2: Alimentos (Substituindo 'recipes' para foco em ingredientes)
+    # Tabela 2: Alimentos (sem foco em custo)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -42,15 +49,7 @@ def init_db():
         )
     ''')
     
-    # Tabela 3: Inventário
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item TEXT UNIQUE,
-            quantity REAL,
-            unit TEXT
-        )
-    ''')
+    cur.execute('CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT UNIQUE, quantity REAL, unit TEXT)')
     
     # Adiciona usuário padrão se o banco estiver vazio
     cur.execute("SELECT COUNT(*) FROM users"); c = cur.fetchone()[0]
@@ -78,7 +77,6 @@ def verify_user(username, password):
 def save_food(name, cal, prot, carb, fat):
     conn = get_conn(); cur = conn.cursor()
     try:
-        # Cost é setado como 0.0, pois o PuLP ainda precisa de um número no DB, mas não será usado.
         cur.execute("INSERT INTO recipes (name, cost, calories, protein, carbs, fat) VALUES (?, 0.0, ?, ?, ?, ?)", 
                     (name, cal, prot, carb, fat))
         conn.commit()
@@ -90,7 +88,6 @@ def save_food(name, cal, prot, carb, fat):
 
 def get_all_foods():
     conn = get_conn(); 
-    # Continuamos a ler da tabela 'recipes', mas ela guarda os Alimentos
     foods = pd.read_sql("SELECT id, name, cost, calories, protein, carbs, fat FROM recipes", conn)
     conn.close()
     return foods
@@ -114,11 +111,30 @@ def get_inventory():
     conn.close()
     return inventory
 
-# --- Estrutura das Páginas do Aplicativo (Lógica Real) ---
+# --- Cálculo da TMB e Macros (NOVA LÓGICA) ---
+
+def calculate_tdee_and_macros(gender, weight, height, age, activity_level_factor, prot_perc, carb_perc, fat_perc):
+    # Fórmula de Mifflin-St Jeor (mais precisa que a de Harris-Benedict)
+    if gender == 'Masculino':
+        tmb = (10 * weight) + (6.25 * height) - (5 * age) + 5
+    else: # Feminino
+        tmb = (10 * weight) + (6.25 * height) - (5 * age) - 161
+        
+    tdee = tmb * activity_level_factor
+    
+    # Conversão para gramas (4 kcal/g para Prot/Carb, 9 kcal/g para Fat)
+    target_prot = (tdee * (prot_perc / 100)) / 4
+    target_carbs = (tdee * (carb_perc / 100)) / 4
+    target_fat = (tdee * (fat_perc / 100)) / 9
+    
+    return int(tdee), int(target_prot), int(target_carbs), int(target_fat)
+
+
+# --- Estrutura das Páginas do Aplicativo (Lógica Principal) ---
 
 def page_planejador_inteligente():
-    st.header("🧠 Planejador Inteligente (Foco 100% Nutricional)")
-    st.info("Otimize seu plano de Alimentos para ATINGIR suas metas nutricionais. O custo é **ignorado**.")
+    st.header("🧠 Planejador Inteligente (Cálculo de Metas + Otimização)")
+    st.info("Calcule suas metas nutricionais e gere um plano de alimentos para atingi-las.")
     
     df_foods = get_all_foods()
     
@@ -126,26 +142,50 @@ def page_planejador_inteligente():
         st.warning("🚨 Por favor, cadastre alimentos na página 'Banco de Alimentos (TACO)' antes de otimizar.")
         return
 
-    # --- Definição de Metas (Interface) ---
-    st.subheader("1. Definição de Metas (Metas Diárias de Nutricionista)")
+    # --- 1. Cálculo de Metas (NOVA SEÇÃO) ---
+    st.subheader("1. Cálculo de Metas Nutricionais")
     
-    with st.form("metas_form"):
-        col1, col2, col3, col4 = st.columns(4)
+    with st.form("metas_calc_form"):
+        col1, col2, col3 = st.columns(3)
         with col1:
-            target_cal = st.number_input("Calorias Alvo (kcal)", min_value=1200, value=2000)
+            gender = st.selectbox("Gênero", ['Masculino', 'Feminino'])
+            weight = st.number_input("Peso (kg)", min_value=30.0, value=70.0, format="%.1f")
+            prot_perc = st.number_input("Proteína (%)", min_value=10, max_value=40, value=25)
         with col2:
-            target_prot = st.number_input("Proteína Alvo (g)", min_value=50, value=80)
+            height = st.number_input("Altura (cm)", min_value=100, value=170)
+            age = st.number_input("Idade (anos)", min_value=15, value=30)
+            carb_perc = st.number_input("Carboidratos (%)", min_value=30, max_value=70, value=50)
         with col3:
-            target_carbs = st.number_input("Carbohidratos Alvo (g)", min_value=100, value=250)
-        with col4:
-            target_fat = st.number_input("Gordura Alvo (g)", min_value=30, value=60)
+            activity_level = st.selectbox("Nível de Atividade", list(TDEE_FACTORS.keys()))
+            fat_perc = st.number_input("Gordura (%)", min_value=10, max_value=40, value=25)
+            
+        # Verifica se a soma das porcentagens é 100
+        total_perc = prot_perc + carb_perc + fat_perc
+        if total_perc != 100:
+            st.error(f"A soma dos macros deve ser 100%. Soma atual: {total_perc}%")
         
         num_days = st.number_input("Número de Dias no Plano", min_value=1, max_value=7, value=3)
+        
+        submitted_calc = st.form_submit_button("Calcular Metas e Otimizar", type="primary")
 
-        submitted = st.form_submit_button("Gerar Plano de Saúde Otimizado", type="primary")
+    if submitted_calc and total_perc == 100:
+        activity_factor = TDEE_FACTORS[activity_level]
+        
+        target_cal, target_prot, target_carbs, target_fat = calculate_tdee_and_macros(
+            gender, weight, height, age, activity_factor, prot_perc, carb_perc, fat_perc
+        )
+        
+        # Exibe os resultados do cálculo
+        st.subheader("Suas Metas Diárias Calculadas:")
+        col_c, col_p, col_ca, col_g = st.columns(4)
+        col_c.metric("Calorias (GET)", f"{target_cal} kcal")
+        col_p.metric("Proteína (g)", f"{target_prot} g")
+        col_ca.metric("Carboidratos (g)", f"{target_carbs} g")
+        col_g.metric("Gordura (g)", f"{target_fat} g")
+        st.markdown("---")
 
-    if submitted:
-        # --- LÓGICA DE OTIMIZAÇÃO (FOCO NA META) ---
+
+        # --- 2. LÓGICA DE OTIMIZAÇÃO (USANDO OS VALORES CALCULADOS) ---
         foods = df_foods['name'].tolist()
         
         # Alvos Totais para o período:
@@ -180,11 +220,11 @@ def page_planejador_inteligente():
             prob.solve(PULP_CBC_CMD())
         
         # --- Visualização de Resultados ---
-        st.subheader("2. Resultado do Plano Otimizado")
+        st.subheader("3. Resultado do Plano Otimizado")
         
         if LpStatus[prob.status] == "Optimal":
             st.balloons()
-            st.success("✅ Plano de dieta otimizado encontrado! Metas nutricionais atendidas.")
+            st.success("✅ Plano de dieta otimizado encontrado!")
             
             final_cal = value(lpSum(df_foods.loc[df_foods['name'] == r, 'calories'].iloc[0] * food_vars[r] for r in foods))
             
@@ -208,6 +248,7 @@ def page_planejador_inteligente():
 
         else:
             st.error(f"❌ Otimização Falhou. Status: {LpStatus[prob.status]}. Não foi possível atingir as metas. Tente reduzir as metas de nutrientes ou adicionar mais alimentos.")
+
 
 def page_receitas():
     st.header("🍚 Banco de Alimentos (Estilo TACO)")
@@ -290,8 +331,6 @@ def page_relatorios():
 
     # Gráfico simples para mostrar a distribuição dos macros
     total_prot = df_foods['protein'].sum()
-    total_carbs = df_foods['carbs'].sum# Gráfico simples para mostrar a distribuição dos macros
-    total_prot = df_foods['protein'].sum()
     total_carbs = df_foods['carbs'].sum()
     total_fat = df_foods['fat'].sum()
     
@@ -315,7 +354,7 @@ def main_app():
     
     PAGES = {
         "Planejador Inteligente": page_planejador_inteligente,
-        "Banco de Alimentos (TACO)": page_receitas, # Foco no alimento
+        "Banco de Alimentos (TACO)": page_receitas, 
         "Inventário": page_inventario,
         "Relatórios": page_relatorios
     }
