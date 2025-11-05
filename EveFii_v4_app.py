@@ -1,4 +1,4 @@
-# EveFii_v10_app.py - Versão FINAL (Composição Corporal e Correção de Banco de Dados)
+# EveFii_v12_app.py - Versão Multiusuário, Completa com PDF e Relatórios
 
 # Imports
 import streamlit as st
@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from pulp import LpProblem, LpMinimize, LpVariable, PULP_CBC_CMD, LpStatus, value, lpSum, const
 import math
+from fpdf import FPDF # Importando FPDF para geração de PDF
+import io
 
 # --- Configuração e Funções de Utilitário ---
 DB_PATH = "evefii_v4.db"
@@ -30,56 +32,14 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
-# 2. Inicialização do Banco de Dados (Com Correção de Migração)
-@st.cache_resource
-def init_db():
+# Funções de Usuário
+def get_user_id(username):
     conn = get_conn(); cur = conn.cursor()
-    
-    cur.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT)')
-    
-    # Tabela de Alimentos
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            name TEXT UNIQUE, 
-            cost REAL, 
-            calories INTEGER, 
-            protein REAL, 
-            carbs REAL, 
-            fat REAL
-        )
-    ''')
-    
-    # Tabela de Métricas Corporais (inclui BMI para o caso de ser a primeira criação)
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS body_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            date TEXT, 
-            weight REAL, 
-            body_fat_perc REAL,
-            waist_circ REAL,
-            bmi REAL
-        )
-    ''')
-    
-    # --- CORREÇÃO DE MIGRAÇÃO: Adicionar BMI se a coluna estiver faltando ---
-    try:
-        # Tenta selecionar a coluna BMI
-        cur.execute("SELECT bmi FROM body_metrics LIMIT 1")
-    except sqlite3.OperationalError:
-        # Se a coluna não existir (erro anterior), adiciona
-        cur.execute("ALTER TABLE body_metrics ADD COLUMN bmi REAL")
-        
-    # Adiciona usuário padrão se o banco estiver vazio
-    cur.execute("SELECT COUNT(*) FROM users"); c = cur.fetchone()[0]
-    if c == 0:
-        pw = hashlib.sha256('change-me'.encode()).hexdigest()
-        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ('eve', pw))
-    
-    conn.commit()
+    cur.execute("SELECT id FROM users WHERE username = ?", (username,))
+    user = cur.fetchone()
     conn.close()
+    return user['id'] if user else None
 
-# 3. Funções de Criptografia e Verificação (Inalteradas)
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -91,13 +51,12 @@ def verify_user(username, password):
     if user:
         return user[0] == hash_password(password)
     return False
-
-# 4. Funções de Alimentos (CRUDS - Inalteradas)
-def save_food(name, cal, prot, carb, fat):
+    
+def register_user(username, password):
     conn = get_conn(); cur = conn.cursor()
     try:
-        cur.execute("INSERT INTO recipes (name, cost, calories, protein, carbs, fat) VALUES (?, 0.0, ?, ?, ?, ?)", 
-                    (name, cal, prot, carb, fat))
+        password_hash = hash_password(password)
+        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -105,9 +64,84 @@ def save_food(name, cal, prot, carb, fat):
     finally:
         conn.close()
 
-def get_all_foods():
+# 2. Inicialização do Banco de Dados (Com Correção de Migração)
+@st.cache_resource
+def init_db():
+    conn = get_conn(); cur = conn.cursor()
+    
+    cur.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT)')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            user_id INTEGER, 
+            name TEXT, 
+            cost REAL, 
+            calories INTEGER, 
+            protein REAL, 
+            carbs REAL, 
+            fat REAL
+        )
+    ''')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS body_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            user_id INTEGER, 
+            date TEXT, 
+            weight REAL, 
+            body_fat_perc REAL,
+            waist_circ REAL,
+            bmi REAL
+        )
+    ''')
+    
+    # --- CORREÇÕES DE MIGRAÇÃO ---
+    
+    # Migração de BMI (v9->v10)
+    try:
+        cur.execute("SELECT bmi FROM body_metrics LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE body_metrics ADD COLUMN bmi REAL")
+        
+    # Migração de user_id (v10->v11)
+    try:
+        cur.execute("SELECT user_id FROM body_metrics LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE body_metrics ADD COLUMN user_id INTEGER")
+        cur.execute("UPDATE body_metrics SET user_id = 1 WHERE user_id IS NULL") # Assume eve=1
+
+    try:
+        cur.execute("SELECT user_id FROM recipes LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE recipes ADD COLUMN user_id INTEGER")
+        cur.execute("UPDATE recipes SET user_id = 1 WHERE user_id IS NULL") # Assume eve=1
+        
+    # Adiciona usuário padrão se o banco estiver vazio
+    cur.execute("SELECT COUNT(*) FROM users"); c = cur.fetchone()[0]
+    if c == 0:
+        pw = hashlib.sha256('change-me'.encode()).hexdigest()
+        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ('eve', pw))
+    
+    conn.commit()
+    conn.close()
+
+# 3. Funções de Alimentos (CRUDS)
+def save_food(user_id, name, cal, prot, carb, fat):
+    conn = get_conn(); cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO recipes (user_id, name, cost, calories, protein, carbs, fat) VALUES (?, ?, 0.0, ?, ?, ?, ?)", 
+                    (user_id, name, cal, prot, carb, fat))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def get_all_foods(user_id):
     conn = get_conn(); 
-    foods = pd.read_sql("SELECT id, name, cost, calories, protein, carbs, fat FROM recipes", conn)
+    foods = pd.read_sql("SELECT id, name, cost, calories, protein, carbs, fat FROM recipes WHERE user_id = ?", conn, params=(user_id,))
     conn.close()
     return foods
 
@@ -141,61 +175,42 @@ def delete_food(food_id):
     finally:
         conn.close()
         
-# 5. Funções de Métricas Corporais (Cálculos de Composição Corporal)
-
-# FÓRMULA NAVAL (U.S. Navy Body Fat Formula - Circunferências)
+# 4. Funções de Métricas Corporais
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
-    # Converte cm para polegadas (1 cm = 0.3937 polegadas)
-    h_in = height * 0.3937
-    n_in = neck * 0.3937
-    w_in = waist * 0.3937
-    hip_in = hip * 0.3937
-
+    h_in = height * 0.3937; n_in = neck * 0.3937; w_in = waist * 0.3937; hip_in = hip * 0.3937
     if gender == 'Masculino':
         try:
             bf = 495 / (1.0324 - 0.19077 * math.log10(w_in - n_in) + 0.15456 * math.log10(h_in)) - 450
         except ValueError: bf = 5.0
-    else: # Feminino
+    else:
         try:
             bf = 495 / (1.29579 - 0.35004 * math.log10(w_in + hip_in - n_in) + 0.22100 * math.log10(h_in)) - 450
         except ValueError: bf = 10.0 
-
     return max(5.0, min(50.0, bf))
 
-# FÓRMULA JACKSON & POLLOCK 7-SÍTIOS (Dobras Cutâneas)
 def calculate_body_fat_jp7(gender, age, sk_chest, sk_triceps, sk_subscap, sk_midax, sk_supra, sk_abdomen, sk_thigh):
-    # Todos os inputs em mm
     S7SKF = sk_chest + sk_triceps + sk_subscap + sk_midax + sk_supra + sk_abdomen + sk_thigh
-    
     if S7SKF <= 0: return 5.0 
-    
     try:
         if gender == 'Masculino':
-            # Densidade Corporal (DB) para Homens
             DB = 1.112 - (0.00043499 * S7SKF) + (0.00000055 * S7SKF**2) - (0.00028826 * age)
-        else: # Feminino
-            # Densidade Corporal (DB) para Mulheres
+        else: 
             DB = 1.0970 - (0.00046971 * S7SKF) + (0.00000056 * S7SKF**2) - (0.00012828 * age)
-
-        # Equação de Siri para % Gordura
         bf = (495 / DB) - 450
-        
     except Exception:
         bf = 5.0 
-
     return max(5.0, min(50.0, bf))
 
 def calculate_bmi(weight, height):
-    # weight em kg, height em cm
     height_m = height / 100.0
     if height_m <= 0: return 0.0
     return weight / (height_m ** 2)
 
-def save_body_metric(date, weight, body_fat_perc, waist_circ, bmi):
+def save_body_metric(user_id, date, weight, body_fat_perc, waist_circ, bmi):
     conn = get_conn(); cur = conn.cursor()
     try:
-        cur.execute("INSERT INTO body_metrics (date, weight, body_fat_perc, waist_circ, bmi) VALUES (?, ?, ?, ?, ?)", 
-                    (date, weight, body_fat_perc, waist_circ, bmi))
+        cur.execute("INSERT INTO body_metrics (user_id, date, weight, body_fat_perc, waist_circ, bmi) VALUES (?, ?, ?, ?, ?, ?)", 
+                    (user_id, date, weight, body_fat_perc, waist_circ, bmi))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -203,51 +218,36 @@ def save_body_metric(date, weight, body_fat_perc, waist_circ, bmi):
     finally:
         conn.close()
 
-def get_body_metrics():
+def get_body_metrics(user_id):
     conn = get_conn(); 
-    # A query agora está segura devido à correção de migração no init_db
-    metrics = pd.read_sql("SELECT date, weight, body_fat_perc, waist_circ, bmi FROM body_metrics ORDER BY date DESC", conn)
+    metrics = pd.read_sql("SELECT date, weight, body_fat_perc, waist_circ, bmi FROM body_metrics WHERE user_id = ? ORDER BY date DESC", conn, params=(user_id,))
     conn.close()
     
     if metrics.empty:
         return metrics
         
-    # Cálculo da Massa Gorda (Peso Gordo) e Massa Magra (Peso Magro)
     metrics['date'] = pd.to_datetime(metrics['date'])
     metrics['Massa Gorda (kg)'] = metrics['weight'] * (metrics['body_fat_perc'] / 100)
     metrics['Massa Magra (kg)'] = metrics['weight'] - metrics['Massa Gorda (kg)']
     
     return metrics
 
-# --- Funções de Planejador e Receitas (Inalteradas) ---
-
+# 5. Funções de Planejador e Otimização
 def calculate_smart_macros(gender, weight, height, age, activity_level_factor, goal):
-    if gender == 'Masculino':
-        tmb = (10 * weight) + (6.25 * height) - (5 * age) + 5
-    else:
-        tmb = (10 * weight) + (6.25 * height) - (5 * age) - 161
+    if gender == 'Masculino': tmb = (10 * weight) + (6.25 * height) - (5 * age) + 5
+    else: tmb = (10 * weight) + (6.25 * height) - (5 * age) - 161
         
     get_tdee = tmb * activity_level_factor
     
     if goal == 'Déficit Calórico':
-        final_cal = get_tdee - 500
-        final_cal = max(final_cal, 1200)
-        prot_multiplier = 2.0 
-        fat_perc = 0.20
+        final_cal = get_tdee - 500; final_cal = max(final_cal, 1200); prot_multiplier = 2.0; fat_perc = 0.20
     elif goal == 'Hipertrofia Muscular':
-        final_cal = get_tdee + 300
-        prot_multiplier = 2.2 
-        fat_perc = 0.25
+        final_cal = get_tdee + 300; prot_multiplier = 2.2; fat_perc = 0.25
     else:
-        final_cal = get_tdee
-        prot_multiplier = 1.8 
-        fat_perc = 0.25
+        final_cal = get_tdee; prot_multiplier = 1.8; fat_perc = 0.25
 
-    final_cal = int(final_cal)
-    
-    target_prot = int(weight * prot_multiplier) 
+    final_cal = int(final_cal); target_prot = int(weight * prot_multiplier) 
     target_fat = int((final_cal * fat_perc) / 9) 
-    
     cal_from_prot_fat = (target_prot * 4) + (target_fat * 9) 
     cal_from_carbs = max(final_cal - cal_from_prot_fat, 400) 
     target_carbs = int(cal_from_carbs / 4)
@@ -307,8 +307,6 @@ def run_optimization(targets, meal_foods, meal_names):
             return
 
     if not optimization_failed:
-        st.subheader("3. Dieta Final Otimizada (Gramas por Refeição)")
-        st.success("✅ Plano detalhado gerado com sucesso!")
         df_final = pd.DataFrame(final_plan)
         df_foods_lookup = targets['df_foods'].set_index('name')
         
@@ -316,28 +314,190 @@ def run_optimization(targets, meal_foods, meal_names):
         total_carbs = df_final.apply(lambda row: df_foods_lookup.loc[row['Alimento'].replace(' ', '_'), 'carbs'] * (row['Gramas'] / 100) if row['Alimento'] != 'Nenhum' and row['Alimento'].replace(' ', '_') in df_foods_lookup.index else 0, axis=1).sum()
         total_fat = df_final.apply(lambda row: df_foods_lookup.loc[row['Alimento'].replace(' ', '_'), 'fat'] * (row['Gramas'] / 100) if row['Alimento'] != 'Nenhum' and row['Alimento'].replace(' ', '_') in df_foods_lookup.index else 0, axis=1).sum()
 
+        # Armazena os resultados no session state para uso no PDF
+        st.session_state['final_plan_df'] = df_final
+        st.session_state['final_totals'] = {
+            'cal': int(total_opt_cal), 
+            'prot': total_prot, 
+            'carbs': total_carbs, 
+            'fat': total_fat
+        }
+        
+        # Exibição dos resultados (UI)
+        st.subheader("3. Dieta Final Otimizada (Gramas por Refeição)")
+        st.success("✅ Plano detalhado gerado com sucesso!")
+        
         col_c, col_p, col_ca, col_g = st.columns(4)
         col_c.metric("Calorias Totais", f"{total_opt_cal:.0f} kcal")
         col_p.metric("Proteína Total", f"{total_prot:.1f} g")
         col_ca.metric("Carboidratos Totais", f"{total_carbs:.1f} g")
         col_g.metric("Gordura Total", f"{total_fat:.1f} g")
         
-        df_final = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
-        df_final['Gramas'] = df_final['Gramas'].round(0).astype(int).astype(str) + ' g'
-        st.dataframe(df_final, hide_index=True)
+        df_display = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
+        df_display['Gramas'] = df_display['Gramas'].round(0).astype(int).astype(str) + ' g'
+        st.dataframe(df_display, hide_index=True)
+        
+        # Chama a função de PDF (nova integração)
+        col_pdf, _ = st.columns([0.4, 0.6])
+        with col_pdf:
+            st.download_button(
+                label="Exportar Dieta para PDF",
+                data=generate_diet_pdf(st.session_state['username'], targets, df_display, st.session_state['final_totals']),
+                file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
 
+# --- Geração de PDF (Novas Funções) ---
+
+class PDF(FPDF):
+    def header(self):
+        # Usando SetFont com fonte padrão compatível com UTF-8
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'EveFii - Relatório de Nutrição', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Página {self.page_no()}', 0, 0, 'C')
+        
+    # Método para escrever célula com suporte a UTF-8/Latin-1 (necessário no FPDF)
+    def cell_utf8(self, w, h, txt, border=0, ln=0, align=''):
+        self.cell(w, h, txt.encode('latin-1', 'replace').decode('latin-1'), border, ln, align)
+
+def generate_diet_pdf(username, targets, df_plan, final_totals):
+    pdf = PDF('P', 'mm', 'A4')
+    pdf.add_page()
+    
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell_utf8(0, 10, f'Plano de Dieta Otimizada para {username}', 0, 1)
+    pdf.ln(2)
+
+    # Macros Summary
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font('Arial', 'B', 10)
+    pdf.cell_utf8(40, 7, 'Calorias Alvo', 1, 0, 'C', 1)
+    pdf.cell_utf8(40, 7, 'Proteína Total', 1, 0, 'C', 1)
+    pdf.cell_utf8(40, 7, 'Carboidratos Total', 1, 0, 'C', 1)
+    pdf.cell_utf8(40, 7, 'Gordura Total', 1, 1, 'C', 1)
+
+    pdf.set_font('Arial', '', 10)
+    pdf.cell_utf8(40, 7, f'{final_totals["cal"]} kcal', 1, 0, 'C')
+    pdf.cell_utf8(40, 7, f'{final_totals["prot"]:.1f} g', 1, 0, 'C')
+    pdf.cell_utf8(40, 7, f'{final_totals["carbs"]:.1f} g', 1, 0, 'C')
+    pdf.cell_utf8(40, 7, f'{final_totals["fat"]:.1f} g', 1, 1, 'C')
+    
+    pdf.ln(5)
+    
+    # Diet Plan Table
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell_utf8(0, 10, 'Detalhes da Dieta:', 0, 1)
+    
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font('Arial', 'B', 10)
+    pdf.cell_utf8(50, 7, 'Refeição', 1, 0, 'C', 1)
+    pdf.cell_utf8(90, 7, 'Alimento', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Quantidade', 1, 1, 'C', 1)
+    
+    pdf.set_font('Arial', '', 10)
+    for index, row in df_plan.iterrows():
+        pdf.cell_utf8(50, 6, str(row['Refeição']), 1, 0, 'L')
+        pdf.cell_utf8(90, 6, str(row['Alimento']), 1, 0, 'L')
+        pdf.cell_utf8(30, 6, str(row['Gramas']), 1, 1, 'R')
+        
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_metrics_pdf(username, df_metrics):
+    pdf = PDF('P', 'mm', 'A4')
+    pdf.add_page()
+    
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell_utf8(0, 10, f'Relatório de Evolução Corporal de {username}', 0, 1)
+    pdf.ln(5)
+
+    # Metrics Summary Table
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font('Arial', 'B', 10)
+    pdf.cell_utf8(20, 7, 'Data', 1, 0, 'C', 1)
+    pdf.cell_utf8(25, 7, 'Peso (kg)', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, '% Gord.', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Gorda', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Magra', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, 'Cintura', 1, 0, 'C', 1)
+    pdf.cell_utf8(15, 7, 'IMC', 1, 1, 'C', 1)
+
+    pdf.set_font('Arial', '', 8)
+    df_metrics_chrono = df_metrics.sort_values(by='date')
+    
+    for index, row in df_metrics_chrono.iterrows():
+        pdf.cell_utf8(20, 6, row['date'].strftime('%d/%m/%Y'), 1, 0, 'C')
+        pdf.cell_utf8(25, 6, f"{row['weight']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['body_fat_perc']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Gorda (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Magra (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['waist_circ']:.1f} cm", 1, 0, 'R')
+        pdf.cell_utf8(15, 6, f"{row['bmi']:.1f}", 1, 1, 'R')
+        
+    # Evolution Summary
+    if len(df_metrics_chrono) > 1:
+        first = df_metrics_chrono.iloc[0]
+        last = df_metrics_chrono.iloc[-1]
+        
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell_utf8(0, 10, 'Resumo da Evolução (Total):', 0, 1)
+        
+        def format_diff_pdf(start, end, metric_name, unit):
+            diff = end - start
+            diff_str = f"{'+' if diff > 0 else ''}{diff:.1f} {unit}"
+            # Define o texto com base no ganho/perda desejada para a métrica
+            if metric_name in ['Peso', '% Gordura', 'Massa Gorda']:
+                color = (0, 100, 0) if diff < 0 else (180, 0, 0) # Verde se perdeu (bom), Vermelho se ganhou (ruim)
+            else: # Massa Magra:
+                color = (0, 100, 0) if diff > 0 else (180, 0, 0) # Verde se ganhou (bom), Vermelho se perdeu (ruim)
+
+            pdf.set_text_color(*color)
+            pdf.cell_utf8(0, 7, f"De {start:.1f} para {end:.1f} {unit} ({diff_str})", 0, 1)
+            pdf.set_text_color(0, 0, 0) # Volta ao preto
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Peso Corporal:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['weight'], last['weight'], 'Peso', 'kg')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, '% Gordura:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['body_fat_perc'], last['body_fat_perc'], '% Gordura', '%')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Gorda:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Gorda (kg)'], last['Massa Gorda (kg)'], 'Massa Gorda', 'kg')
+
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Magra:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Magra (kg)'], last['Massa Magra (kg)'], 'Massa Magra', 'kg')
+
+        
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- Estrutura das Páginas ---
 
 def page_planejador_inteligente():
+    # [Mantendo o restante da lógica da página page_planejador_inteligente]
+    user_id = st.session_state['user_id']
     st.header("🧠 Planejador Inteligente (Refeições e Gramas)")
     st.info("Otimize seu plano de alimentos em **gramas** para atingir as metas calculadas.")
-    df_foods = get_all_foods()
+    
+    df_foods = get_all_foods(user_id) 
+    
     if df_foods.empty:
-        st.warning("🚨 Por favor, cadastre alimentos na página 'Banco de Alimentos (TACO)' antes de otimizar.")
+        st.warning(f"🚨 Por favor, **{st.session_state['username']}**, cadastre alimentos na página 'Banco de Alimentos (TACO)' antes de otimizar.")
         return
 
-    # --- 1. Cálculo de Metas ---
     st.subheader("1. Seus Dados e Objetivo")
     with st.form("metas_calc_form"):
         col1, col2, col3 = st.columns(3)
@@ -370,7 +530,6 @@ def page_planejador_inteligente():
         col_g.metric("Gordura Alvo", f"{target_fat} g")
         st.markdown("---")
     
-    # --- 2. Definição da Dieta por Refeição ---
     if 'targets' in st.session_state:
         targets = st.session_state['targets']
         st.subheader(f"2. Montagem do Plano de Refeições ({targets['num_meals']} Refeições)")
@@ -402,12 +561,35 @@ def page_planejador_inteligente():
         st.markdown("---")
         if st.button("Gerar Dieta Final em Gramas", type="primary"):
             run_optimization(targets, st.session_state['meal_foods'], st.session_state['meal_names'])
-
+            
+    # Tratamento de Download Button (necessário para persistir após o rerun do botão de calcular)
+    if 'final_plan_df' in st.session_state and 'final_totals' in st.session_state:
+        st.markdown("---")
+        st.subheader("Download da Dieta Gerada")
+        col_pdf, _ = st.columns([0.4, 0.6])
+        with col_pdf:
+            st.download_button(
+                label="Exportar Dieta para PDF",
+                data=generate_diet_pdf(
+                    st.session_state['username'], 
+                    st.session_state['targets'], # targets originais (metas)
+                    st.session_state['final_plan_df'].groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index(),
+                    st.session_state['final_totals'] # totais calculados
+                ),
+                file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
+        
 def page_receitas():
+    # [Mantendo o restante da lógica da página page_receitas]
+    user_id = st.session_state['user_id']
     st.header("🍚 Banco de Alimentos (TACO) - 100g")
-    st.info("Cadastre/Edite os dados nutricionais de cada alimento para uma porção de **100g**.")
-    df_foods = get_all_foods()
+    st.info(f"Gerencie seu banco de alimentos, **{st.session_state['username']}**.")
     
+    df_foods = get_all_foods(user_id) 
+    
+    # ... (Restante da UI de CRUD de receitas)
     st.subheader("Alimentos Cadastrados (por 100g)")
     if not df_foods.empty:
         df_display = df_foods.copy()
@@ -453,7 +635,7 @@ def page_receitas():
                         st.success(f"Alimento '{nome}' atualizado com sucesso!")
                         st.rerun()
                     else:
-                        st.error(f"Erro: Não foi possível atualizar. O nome '{nome}' pode já existir.")
+                        st.error(f"Erro: Não foi possível atualizar. O nome '{nome}' pode já existir para você.")
     else:
         st.info("Nenhum alimento cadastrado ainda.")
     
@@ -472,28 +654,29 @@ def page_receitas():
         
         submitted = st.form_submit_button("Salvar Novo Alimento", type="primary")
         if submitted and nome:
-            if save_food(nome, calorias, proteina, carboidratos, gordura):
+            if save_food(user_id, nome, calorias, proteina, carboidratos, gordura):
                 st.success(f"Alimento '{nome}' salvo com sucesso!")
                 st.rerun()
             else:
-                st.error(f"Erro: O alimento '{nome}' já existe. Por favor, use um nome diferente.")
+                st.error(f"Erro: O alimento '{nome}' já existe para você. Por favor, use um nome diferente.")
 
 def page_avaliacao_fisica():
-    st.header("🏋️ Avaliação Física e Composição Corporal")
-    st.info("Use dobras cutâneas (JP7) ou circunferências (Naval) para calcular o % de Gordura e monitorar sua Massa Magra/Gorda.")
+    # [Mantendo o restante da lógica da página page_avaliacao_fisica]
+    user_id = st.session_state['user_id']
+    st.header(f"🏋️ Avaliação Física e Composição Corporal - {st.session_state['username']}")
+    st.info("Monitore sua composição corporal separadamente.")
     
-    # --- 1. Formulário de Cálculo e Cadastro de Métrica ---
+    df_metrics = get_body_metrics(user_id) 
+    
+    # [Restante do formulário de registro de métricas...]
     st.subheader("Registrar Nova Métrica")
     
-    # Valores Iniciais
     initial_values = {
         'weight': 75.0, 'height': 175.0, 'age': 30, 'neck': 38.0, 'waist': 80.0, 'hip': 95.0,
         'sk_chest': 10.0, 'sk_triceps': 10.0, 'sk_subscap': 15.0, 'sk_midax': 10.0, 'sk_supra': 15.0, 'sk_abdomen': 20.0, 'sk_thigh': 20.0
     }
     
-    df_metrics = get_body_metrics()
     if not df_metrics.empty:
-        # Tenta preencher com a última avaliação (peso e cintura)
         last = df_metrics.iloc[0]
         initial_values['weight'] = last['weight']
         initial_values['waist'] = last['waist_circ']
@@ -519,12 +702,8 @@ def page_avaliacao_fisica():
 
         with col_medidas:
             st.markdown("##### Medidas Requeridas (cm ou mm)")
+            waist = initial_values['waist']; hip = 0.0; neck = 0.0
             
-            # Inicializa variáveis para o escopo do formulário, com base no método
-            waist = initial_values['waist']
-            hip = 0.0
-            neck = 0.0
-
             if calc_method == 'Circunferências (Naval)':
                 st.info("Medidas em **cm**. Utilize fita métrica.")
                 neck = st.number_input("Pescoço (cm)", min_value=25.0, format="%.1f", value=initial_values['neck'])
@@ -535,24 +714,17 @@ def page_avaliacao_fisica():
                 if gender == 'Masculino' and waist <= neck:
                     st.error("Para o cálculo Naval (Homens), a Cintura deve ser maior que o Pescoço.")
                 
-                sk_chest = sk_triceps = sk_subscap = sk_midax = sk_supra = sk_abdomen = sk_thigh = 0.0
-
             else: # Dobras Cutâneas (Jackson/Pollock 7)
                 st.info("Medidas em **mm**. Utilize um adipômetro (dobras cutâneas).")
                 st.markdown("---")
                 sk_col1, sk_col2, sk_col3 = st.columns(3)
-                
                 sk_chest = sk_col1.number_input("Peitoral (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_chest'])
                 sk_triceps = sk_col1.number_input("Tríceps (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_triceps'])
                 sk_subscap = sk_col1.number_input("Subescapular (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_subscap'])
-                
                 sk_midax = sk_col2.number_input("Axilar Média (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_midax'])
                 sk_supra = sk_col2.number_input("Suprailíaca (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_supra'])
-                
                 sk_abdomen = sk_col3.number_input("Abdominal (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_abdomen'])
                 sk_thigh = sk_col3.number_input("Coxa (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_thigh'])
-                
-                # Apenas cintura é salva no BD, mesmo que não usada no cálculo JP7
                 waist = st.number_input("Cintura (cm) - Opcional para Histórico", min_value=50.0, format="%.1f", value=initial_values['waist'])
 
 
@@ -560,9 +732,8 @@ def page_avaliacao_fisica():
         
         col_calc, col_save = st.columns(2)
         
-        # --- Lógica de Cálculo ---
         if 'calculated_bf' in st.session_state and st.session_state.get('last_method') == calc_method:
-            pass # Mantém o estado para a seção de salvamento
+            pass
         else:
             st.session_state.pop('calculated_bf', None)
             st.session_state.pop('waist_circ_save', None)
@@ -596,7 +767,6 @@ def page_avaliacao_fisica():
                 st.metric("Massa Gorda", f"{mg_val:.1f} kg")
                 st.metric("Massa Magra", f"{mm_val:.1f} kg")
                 
-                # Cálculo de Risco Cintura-Quadril (somente se houver quadril na medição Naval)
                 if gender == 'Feminino' and calc_method == 'Circunferências (Naval)' and hip > 0:
                      whr = waist / hip
                      whr_risk = "Baixo"
@@ -608,8 +778,8 @@ def page_avaliacao_fisica():
                 if st.form_submit_button("Salvar Métrica no Histórico", type="primary"):
                     date_str = date.strftime('%Y-%m-%d')
                     
-                    if save_body_metric(date_str, weight, bf_val, st.session_state['waist_circ_save'], bmi_val):
-                        st.success(f"Métrica de {date_str} registrada com sucesso!")
+                    if save_body_metric(user_id, date_str, weight, bf_val, st.session_state['waist_circ_save'], bmi_val):
+                        st.success(f"Métrica de {date_str} registrada com sucesso para {st.session_state['username']}!")
                         del st.session_state['calculated_bf']
                         del st.session_state['waist_circ_save']
                         del st.session_state['bmi_save']
@@ -623,15 +793,13 @@ def page_avaliacao_fisica():
 
     st.markdown("---")
     
-    # --- 2. Histórico e Análise ---
     st.subheader("Histórico de Composição Corporal")
-    df_metrics = get_body_metrics()
+    df_metrics = get_body_metrics(user_id)
     
     if df_metrics.empty:
-        st.info("Nenhuma métrica registrada ainda. Adicione uma acima!")
+        st.info(f"Nenhuma métrica registrada ainda para {st.session_state['username']}.")
         return
 
-    # Exibe a última avaliação
     last_metric = df_metrics.iloc[0]
     st.markdown(f"##### Última Avaliação ({last_metric['date'].strftime('%d/%m/%Y')}):")
     
@@ -644,42 +812,105 @@ def page_avaliacao_fisica():
     
     st.markdown("---")
 
-    # Gráficos de Progresso
     df_metrics = df_metrics.sort_values(by='date')
     st.line_chart(df_metrics, x='date', y=['weight', 'Massa Magra (kg)', 'Massa Gorda (kg)'])
     st.line_chart(df_metrics, x='date', y=['body_fat_perc', 'bmi'])
 
-
 def page_relatorios():
-    st.header("📊 Relatórios e Análise de Nutrientes")
-    st.info("Gráfico de análise da composição dos alimentos cadastrados.")
+    user_id = st.session_state['user_id']
+    st.header(f"📊 Relatório de Evolução e Análise - {st.session_state['username']}")
     
-    st.subheader("Distribuição de Nutrientes Cadastrados")
+    df_metrics = get_body_metrics(user_id)
+    df_foods = get_all_foods(user_id) 
     
-    df_foods = get_all_foods()
+    st.subheader("1. Evolução de Métricas Corporais")
+    if df_metrics.empty:
+        st.warning("Cadastre métricas corporais para visualizar o relatório de evolução.")
+    elif len(df_metrics) < 2:
+        st.info(f"Você tem apenas **{len(df_metrics)}** avaliação. Duas ou mais avaliações são necessárias para calcular a evolução.")
+        # Exibe a única métrica
+        last_metric = df_metrics.iloc[0]
+        st.markdown(f"**Avaliação Registrada:** {last_metric['date'].strftime('%d/%m/%Y')}")
+    else:
+        # Relatório de Evolução
+        df_metrics_chrono = df_metrics.sort_values(by='date')
+        first = df_metrics_chrono.iloc[0]
+        last = df_metrics_chrono.iloc[-1]
+        
+        st.markdown(f"**Análise da Evolução:** {first['date'].strftime('%d/%m/%Y')} a {last['date'].strftime('%d/%m/%Y')}")
+        
+        col_w, col_bf, col_mm, col_mg = st.columns(4)
+        
+        def display_evolution(col, metric_name, start_val, end_val, unit):
+            diff = end_val - start_val
+            diff_str = f"{'+' if diff > 0 else ''}{diff:.1f} {unit}"
+            
+            # Cor: Verde para resultados desejados (perda de peso/gordura, ganho de massa magra)
+            if (metric_name in ['Peso', '% Gordura', 'Massa Gorda'] and diff < 0) or \
+               (metric_name == 'Massa Magra' and diff > 0):
+                delta_color = "inverse" if diff < 0 else "normal"
+                color = "green"
+            elif diff != 0:
+                delta_color = "normal" if diff > 0 else "inverse"
+                color = "red"
+            else:
+                delta_color = "off"
+                color = "normal"
+
+            col.metric(
+                metric_name, 
+                f"{end_val:.1f} {unit}", 
+                delta=diff_str, 
+                delta_color=delta_color if diff != 0 else "off"
+            )
+
+        display_evolution(col_w, 'Peso', first['weight'], last['weight'], 'kg')
+        display_evolution(col_bf, '% Gordura', first['body_fat_perc'], last['body_fat_perc'], '%')
+        display_evolution(col_mg, 'Massa Gorda', first['Massa Gorda (kg)'], last['Massa Gorda (kg)'], 'kg')
+        display_evolution(col_mm, 'Massa Magra', first['Massa Magra (kg)'], last['Massa Magra (kg)'], 'kg')
+        
+        st.markdown("---")
+        
+        # Botão de Download do Relatório de Evolução em PDF
+        st.download_button(
+            label="Exportar Relatório de Evolução para PDF",
+            data=generate_metrics_pdf(st.session_state['username'], df_metrics),
+            file_name=f"Evolucao_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
+            mime="application/pdf",
+            type="primary"
+        )
+        
+    st.markdown("---")
+    st.subheader("2. Distribuição de Nutrientes (Banco de Alimentos)")
     
     if df_foods.empty:
         st.warning("Cadastre alimentos para visualizar a análise.")
-        return
-
-    total_prot = df_foods['protein'].sum()
-    total_carbs = df_foods['carbs'].sum()
-    total_fat = df_foods['fat'].sum()
-    
-    data = [total_prot, total_carbs, total_fat]
-    labels = ['Proteína', 'Carboidratos', 'Gordura']
-    
-    fig, ax = plt.subplots()
-    ax.pie(data, labels=labels, autopct='%1.1f%%', startangle=90, colors=['#4CAF50', '#2196F3', '#FFC107'])
-    ax.axis('equal') 
-    ax.set_title('Distribuição Total de Macronutrientes (Por 100g de Alimento)')
-    
-    st.pyplot(fig)
-
+    else:
+        total_prot = df_foods['protein'].sum()
+        total_carbs = df_foods['carbs'].sum()
+        total_fat = df_foods['fat'].sum()
+        
+        data = [total_prot, total_carbs, total_fat]
+        labels = ['Proteína', 'Carboidratos', 'Gordura']
+        
+        fig, ax = plt.subplots()
+        ax.pie(data, labels=labels, autopct='%1.1f%%', startangle=90, colors=['#4CAF50', '#2196F3', '#FFC107'])
+        ax.axis('equal') 
+        ax.set_title('Distribuição Total de Macronutrientes (Por 100g de Alimento)')
+        
+        st.pyplot(fig)
 
 # --- Login e Roteamento Principal ---
 
 def main_app():
+    if 'user_id' not in st.session_state:
+        st.session_state['user_id'] = get_user_id(st.session_state['username'])
+        if st.session_state['user_id'] is None:
+             st.error("Erro fatal: Usuário logado não encontrado no banco de dados. Fazendo logout.")
+             st.session_state['logged_in'] = False
+             st.rerun()
+             return
+
     st.sidebar.markdown(f"**Usuário Logado:** `{st.session_state.get('username', 'N/A')}`")
     st.sidebar.markdown("---")
     
@@ -687,42 +918,66 @@ def main_app():
         "Planejador Inteligente": page_planejador_inteligente,
         "Avaliação Física": page_avaliacao_fisica,
         "Banco de Alimentos (TACO)": page_receitas, 
-        "Relatórios": page_relatorios
+        "Relatório de Evolução": page_relatorios # Nome da página alterado
     }
 
-    st.sidebar.title("EveFii v10 Completo (Nutrição)")
+    st.sidebar.title("EveFii v12 - Completo")
     selection = st.sidebar.radio("Navegação", list(PAGES.keys()))
     
     st.sidebar.markdown("---")
     if st.sidebar.button("Logout", type="secondary"):
         st.session_state['logged_in'] = False
         st.session_state.pop('username', None)
+        st.session_state.pop('user_id', None)
+        # Limpa estados temporários relacionados a planos/calculos
+        st.session_state.pop('targets', None)
+        st.session_state.pop('final_plan_df', None)
+        st.session_state.pop('final_totals', None)
         st.rerun()
 
     PAGES[selection]()
 
 def show_login():
-    st.title("EveFii v10 — Focado em Nutrição")
-    st.subheader("Faça Login para Continuar")
+    st.title("EveFii v12 — Suporte Multiusuário")
+    st.subheader("Faça Login ou Cadastre-se")
     
-    with st.form("login_form"):
-        username = st.text_input("Usuário")
-        password = st.text_input("Senha", type='password')
-        login_submitted = st.form_submit_button("Login", type="primary")
-        
-        if login_submitted:
-            if verify_user(username, password):
-                st.session_state['logged_in'] = True
-                st.session_state['username'] = username
-                st.rerun()
-            else:
-                st.error("Usuário ou Senha inválidos. (Padrão: eve / change-me)")
+    tab_login, tab_register = st.tabs(["Login", "Cadastrar Novo Usuário"])
+    
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("Usuário")
+            password = st.text_input("Senha", type='password')
+            login_submitted = st.form_submit_button("Login", type="primary")
+            
+            if login_submitted:
+                if verify_user(username, password):
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = username
+                    st.session_state['user_id'] = get_user_id(username)
+                    st.rerun()
+                else:
+                    st.error("Usuário ou Senha inválidos. (Padrão: eve / change-me)")
+
+    with tab_register:
+        with st.form("register_form"):
+            new_username = st.text_input("Novo Usuário (Ex: esposa)")
+            new_password = st.text_input("Nova Senha", type='password')
+            register_submitted = st.form_submit_button("Cadastrar", type="secondary")
+            
+            if register_submitted:
+                if len(new_username) < 3 or len(new_password) < 5:
+                    st.error("Usuário deve ter 3+ caracteres e Senha 5+.")
+                elif register_user(new_username, new_password):
+                    st.success(f"Usuário '{new_username}' cadastrado com sucesso! Faça login.")
+                else:
+                    st.error(f"Erro: Usuário '{new_username}' já existe.")
+
 
 # --- Início da Execução ---
 
 if __name__ == "__main__":
     
-    st.set_page_config(page_title="EveFii v10 Nutrição", layout="wide")
+    st.set_page_config(page_title="EveFii v12 Nutrição", layout="wide")
     
     init_db()
     
