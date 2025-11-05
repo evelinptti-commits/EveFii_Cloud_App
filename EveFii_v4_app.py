@@ -315,8 +315,15 @@ def run_optimization(targets, meal_foods, meal_names):
             
             for v in prob.variables():
                 if v.varValue > 1 and f"Gramas_Refeicao_{i+1}" in v.name:
-                    food_name = v.name.split('_')[-1].replace('_', ' ')
                     gramas = v.varValue
+                    
+                    # --- CORREÇÃO DO BUG (EXTRAÇÃO DO NOME DO ALIMENTO) ---
+                    # O nome do alimento (a chave) começa no quarto elemento (índice 3)
+                    parts = v.name.split('_')
+                    food_name_parts = parts[3:] 
+                    pulp_key = "_".join(food_name_parts) 
+                    food_name = pulp_key.replace('_', ' ') 
+                    # ---------------------------------------------------
                     
                     df_food_val = df_meal.loc[food_name]
                     meal_prot += df_food_val['protein'] * (gramas / 100)
