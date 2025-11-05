@@ -1,4 +1,4 @@
-# EveFii_v4_app.py - Versão FINAL, Completa e Funcional (Cálculo de Metas e Foco em Nutrição/Alimentos)
+# EveFii_v4_app.py - Versão FINAL, Completa e Funcional (Cálculo de Metas Inteligente + Foco em Nutrição/Alimentos - SEM CUSTO)
 
 # Imports
 import streamlit as st
@@ -111,30 +111,60 @@ def get_inventory():
     conn.close()
     return inventory
 
-# --- Cálculo da TMB e Macros (NOVA LÓGICA) ---
+# --- Cálculo da TMB e Macros (LÓGICA INTELIGENTE) ---
 
-def calculate_tdee_and_macros(gender, weight, height, age, activity_level_factor, prot_perc, carb_perc, fat_perc):
-    # Fórmula de Mifflin-St Jeor (mais precisa que a de Harris-Benedict)
+def calculate_smart_macros(gender, weight, height, age, activity_level_factor, goal):
+    # 1. Cálculo do TMB (Mifflin-St Jeor)
     if gender == 'Masculino':
         tmb = (10 * weight) + (6.25 * height) - (5 * age) + 5
     else: # Feminino
         tmb = (10 * weight) + (6.25 * height) - (5 * age) - 161
         
-    tdee = tmb * activity_level_factor
+    get_tdee = tmb * activity_level_factor
     
-    # Conversão para gramas (4 kcal/g para Prot/Carb, 9 kcal/g para Fat)
-    target_prot = (tdee * (prot_perc / 100)) / 4
-    target_carbs = (tdee * (carb_perc / 100)) / 4
-    target_fat = (tdee * (fat_perc / 100)) / 9
-    
-    return int(tdee), int(target_prot), int(target_carbs), int(target_fat)
+    # 2. Ajuste de Calorias (GET Final)
+    if goal == 'Déficit Calórico':
+        final_cal = get_tdee - 500
+        # Garante que não caia abaixo de 1200 kcal
+        final_cal = max(final_cal, 1200)
+        prot_multiplier = 2.0 # 2.0g/kg para preservar massa muscular em déficit
+    elif goal == 'Hipertrofia Muscular':
+        final_cal = get_tdee + 300
+        prot_multiplier = 2.2 # 2.2g/kg para ganho muscular
+    else: # Manutenção
+        final_cal = get_tdee
+        prot_multiplier = 1.8 # 1.8g/kg para manutenção (pode ser ajustado)
 
+    final_cal = int(final_cal)
+    
+    # 3. Distribuição dos Macros em Gramas
+    
+    # A) Proteína: Fixa por peso corporal, prioridade máxima
+    target_prot = int(weight * prot_multiplier) 
+    
+    # B) Gordura: Mantida em 20-25% das calorias totais para saúde hormonal
+    # Usaremos 25% para manutenção/hipertrofia e 20% para déficit
+    fat_perc = 0.25 if goal != 'Déficit Calórico' else 0.20
+    target_fat = int((final_cal * fat_perc) / 9) # 9 kcal/g de gordura
+
+    # C) Carboidrato: Preenche o restante das calorias
+    cal_from_prot_fat = (target_prot * 4) + (target_fat * 9) # 4 kcal/g de proteína/carbo
+    
+    # Se o objetivo for muito agressivo e o TMB for baixo, isso pode ser negativo.
+    # Garante um mínimo de 100g de carboidrato.
+    cal_from_carbs = max(final_cal - cal_from_prot_fat, 400) # 400 kcal = 100g carb
+    target_carbs = int(cal_from_carbs / 4)
+    
+    # Recalcula as calorias finais após o ajuste mínimo de carbo
+    recalculated_cal = (target_prot * 4) + (target_carbs * 4) + (target_fat * 9)
+    
+    return int(recalculated_cal), target_prot, target_carbs, target_fat
 
 # --- Estrutura das Páginas do Aplicativo (Lógica Principal) ---
 
 def page_planejador_inteligente():
     st.header("🧠 Planejador Inteligente (Cálculo de Metas + Otimização)")
-    st.info("Calcule suas metas nutricionais e gere um plano de alimentos para atingi-las.")
+    st.info("Otimize seu plano de alimentos para atingir as metas nutricionais calculadas pelo sistema.")
     
     df_foods = get_all_foods()
     
@@ -143,49 +173,44 @@ def page_planejador_inteligente():
         return
 
     # --- 1. Cálculo de Metas (NOVA SEÇÃO) ---
-    st.subheader("1. Cálculo de Metas Nutricionais")
+    st.subheader("1. Seus Dados e Objetivo")
     
     with st.form("metas_calc_form"):
         col1, col2, col3 = st.columns(3)
         with col1:
             gender = st.selectbox("Gênero", ['Masculino', 'Feminino'])
-            weight = st.number_input("Peso (kg)", min_value=30.0, value=70.0, format="%.1f")
-            prot_perc = st.number_input("Proteína (%)", min_value=10, max_value=40, value=25)
+            weight = st.number_input("Peso (kg)", min_value=30.0, value=75.0, format="%.1f")
+            goal = st.selectbox("Objetivo", ['Manutenção', 'Déficit Calórico', 'Hipertrofia Muscular'])
         with col2:
-            height = st.number_input("Altura (cm)", min_value=100, value=170)
+            height = st.number_input("Altura (cm)", min_value=100, value=175)
             age = st.number_input("Idade (anos)", min_value=15, value=30)
-            carb_perc = st.number_input("Carboidratos (%)", min_value=30, max_value=70, value=50)
+            
         with col3:
             activity_level = st.selectbox("Nível de Atividade", list(TDEE_FACTORS.keys()))
-            fat_perc = st.number_input("Gordura (%)", min_value=10, max_value=40, value=25)
+            num_days = st.number_input("Duração do Plano (Dias)", min_value=1, max_value=7, value=3)
             
-        # Verifica se a soma das porcentagens é 100
-        total_perc = prot_perc + carb_perc + fat_perc
-        if total_perc != 100:
-            st.error(f"A soma dos macros deve ser 100%. Soma atual: {total_perc}%")
-        
-        num_days = st.number_input("Número de Dias no Plano", min_value=1, max_value=7, value=3)
-        
-        submitted_calc = st.form_submit_button("Calcular Metas e Otimizar", type="primary")
+        submitted_calc = st.form_submit_button("Calcular Metas e Otimizar Plano", type="primary")
 
-    if submitted_calc and total_perc == 100:
+    if submitted_calc:
         activity_factor = TDEE_FACTORS[activity_level]
         
-        target_cal, target_prot, target_carbs, target_fat = calculate_tdee_and_macros(
-            gender, weight, height, age, activity_factor, prot_perc, carb_perc, fat_perc
+        target_cal, target_prot, target_carbs, target_fat = calculate_smart_macros(
+            gender, weight, height, age, activity_factor, goal
         )
         
         # Exibe os resultados do cálculo
         st.subheader("Suas Metas Diárias Calculadas:")
         col_c, col_p, col_ca, col_g = st.columns(4)
-        col_c.metric("Calorias (GET)", f"{target_cal} kcal")
-        col_p.metric("Proteína (g)", f"{target_prot} g")
-        col_ca.metric("Carboidratos (g)", f"{target_carbs} g")
-        col_g.metric("Gordura (g)", f"{target_fat} g")
+        col_c.metric("Calorias Alvo", f"{target_cal} kcal")
+        col_p.metric("Proteína Alvo", f"{target_prot} g")
+        col_ca.metric("Carboidratos Alvo", f"{target_carbs} g")
+        col_g.metric("Gordura Alvo", f"{target_fat} g")
         st.markdown("---")
 
 
         # --- 2. LÓGICA DE OTIMIZAÇÃO (USANDO OS VALORES CALCULADOS) ---
+        st.subheader("2. Otimização do Plano de Alimentos")
+
         foods = df_foods['name'].tolist()
         
         # Alvos Totais para o período:
@@ -211,8 +236,9 @@ def page_planejador_inteligente():
         prob += dev_cal_pos + dev_cal_neg, "Minimizar_Desvio_Calorico"
 
         # Restrições de Nutrientes (Garantir um mínimo/máximo)
-        prob += lpSum(df_foods.loc[df_foods['name'] == r, 'protein'].iloc[0] * food_vars[r] for r in foods) >= total_target_prot * 0.9, "Restricao_Proteina_Min"
-        prob += lpSum(df_foods.loc[df_foods['name'] == r, 'carbs'].iloc[0] * food_vars[r] for r in foods) >= total_target_carbs * 0.9, "Restricao_Carbos_Min"
+        # Usamos uma tolerância de 5% para Prot/Carb e 10% para Fat
+        prob += lpSum(df_foods.loc[df_foods['name'] == r, 'protein'].iloc[0] * food_vars[r] for r in foods) >= total_target_prot * 0.95, "Restricao_Proteina_Min"
+        prob += lpSum(df_foods.loc[df_foods['name'] == r, 'carbs'].iloc[0] * food_vars[r] for r in foods) >= total_target_carbs * 0.95, "Restricao_Carbos_Min"
         prob += lpSum(df_foods.loc[df_foods['name'] == r, 'fat'].iloc[0] * food_vars[r] for r in foods) <= total_target_fat * 1.1, "Restricao_Gordura_Max"
 
         # Resolvendo o Problema
@@ -247,7 +273,7 @@ def page_planejador_inteligente():
                 st.warning("Plano otimizado, mas não foi possível encontrar um plano viável com as restrições de nutrientes.")
 
         else:
-            st.error(f"❌ Otimização Falhou. Status: {LpStatus[prob.status]}. Não foi possível atingir as metas. Tente reduzir as metas de nutrientes ou adicionar mais alimentos.")
+            st.error(f"❌ Otimização Falhou. Status: {LpStatus[prob.status]}. Não foi possível atingir as metas. Tente adicionar mais alimentos com maior densidade nutricional ou reduzir as metas de dias.")
 
 
 def page_receitas():
@@ -405,5 +431,7 @@ if __name__ == "__main__":
 
     if st.session_state['logged_in']:
         main_app()
+    else:
+        show_login()
     else:
         show_login()
