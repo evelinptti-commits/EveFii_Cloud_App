@@ -299,11 +299,6 @@ def calculate_macros_from_plan(df_plan, df_foods):
         'sodium': df_merged['Sodium_Total'].sum()
     }
 
-# ESTA FUNÇÃO FOI REMOVIDA PARA MANTER APENAS O PLANEJADOR MANUAL NA VERSÃO UNIFICADA
-# def run_optimization(targets, meal_foods, meal_names):
-# ...
-
-
 # --- Funções de Métricas Corporais ---
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
     h_in = height * 0.3937; n_in = neck * 0.3937; w_in = waist * 0.3937; hip_in = hip * 0.3937
@@ -515,9 +510,79 @@ def calculate_water_goal(weight_kg, age_years):
 
 # --- Estrutura das Páginas ---
 
-# FUNÇÃO page_planejador_inteligente FOI REMOVIDA AQUI NA VERSÃO UNIFICADA
+def page_hidratacao_agua():
+    user_id = st.session_state['user_id']
+    st.header("💧 Calculadora de Hidratação (Água)")
+    st.info("Calcule sua meta diária de ingestão de água com base em seu peso e idade, e acompanhe o consumo.")
+    
+    # 1. Recuperar dados do usuário
+    df_metrics = get_body_metrics(user_id)
+    profile = get_user_profile(user_id)
+    
+    initial_weight = df_metrics.iloc[0]['weight'] if not df_metrics.empty else 75.0
+    initial_age = int(profile.get('age')) if profile and profile.get('age') else 30
+    
+    with st.form("water_goal_form"):
+        col1, col2 = st.columns(2)
+        
+        weight = col1.number_input(
+            "Seu Peso (kg) - Atualizado pela última métrica", 
+            min_value=30.0, 
+            value=initial_weight, 
+            format="%.1f"
+        )
+        age = col2.number_input("Sua Idade (anos)", min_value=15, value=initial_age)
+        
+        submitted = st.form_submit_button("Calcular Meta de Água", type="primary")
 
-# --- INÍCIO DA FUNÇÃO DO PLANEJADOR MANUAL COM CORREÇÃO ---
+    if submitted:
+        goal_liters, ml_per_kg = calculate_water_goal(weight, age)
+        
+        st.session_state['water_goal'] = goal_liters
+        st.session_state['ml_per_kg'] = ml_per_kg
+
+    if 'water_goal' in st.session_state:
+        st.subheader("Sua Meta Diária:")
+        goal = st.session_state['water_goal']
+        ml_kg = st.session_state['ml_per_kg']
+        
+        st.success(f"Sua meta de ingestão de água é de **{goal:.2f} Litros** por dia.")
+        st.caption(f"Baseado no seu peso de {weight:.1f} kg e idade de {age} anos (fator de {ml_kg} ml/kg).")
+        
+        st.markdown("---")
+        
+        st.subheader("Acompanhamento Diário")
+        
+        # Inicializa o log se a data for diferente (reset diário)
+        if 'water_log' not in st.session_state or datetime.now().date() != st.session_state.get('water_date'):
+            st.session_state['water_log'] = 0.0
+            st.session_state['water_date'] = datetime.now().date()
+            
+        current_log = st.session_state['water_log']
+        
+        col_log, col_add = st.columns([2, 1])
+        
+        col_log.metric(
+            "Consumo Registrado Hoje", 
+            f"{current_log:.2f} Litros", 
+            delta=f"{goal - current_log:.2f} L Restantes", 
+            delta_color="off" if current_log >= goal else "normal"
+        )
+        
+        add_amount = col_add.selectbox("Adicionar (Litros)", [0.2, 0.5, 1.0], index=1)
+        
+        if col_add.button(f"Adicionar {add_amount} L", type="secondary", use_container_width=True):
+            st.session_state['water_log'] += add_amount
+            st.rerun()
+            
+        st.progress(min(current_log / goal, 1.0), text=f"Progresso: {min(current_log / goal * 100, 100):.0f}%")
+        
+        if current_log >= goal:
+            st.balloons()
+            st.success("🎉 Meta de hidratação atingida! Parabéns!")
+    else:
+        st.warning("Pressione 'Calcular Meta de Água' para iniciar o acompanhamento.")
+
 
 def page_planejador_principal():
     user_id = st.session_state['user_id']
@@ -760,12 +825,6 @@ def page_planejador_principal():
             st.markdown("##### Plano Manual Consolidado (Tabela):")
             st.dataframe(df_daily_plan.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index(), hide_index=True, use_container_width=True)
 
-# --- FIM DA FUNÇÃO DO PLANEJADOR MANUAL COM CORREÇÃO ---
-
-
-def page_hidratacao_agua():
-    user_id = st.session_state['user_id']
-# ... (funções page_hidratacao_agua, page_receitas, page_avaliacao_fisica, page_relatorios permanecem as mesmas)
 
 def page_receitas():
     user_id = st.session_state['user_id']
@@ -1178,7 +1237,7 @@ def main_app():
         "Planejador Principal (Manual Reativo)": page_planejador_principal,
         "Avaliação Física": page_avaliacao_fisica,
         "Banco de Alimentos (TACO)": page_receitas, 
-        "💧 Hidratação (Água)": page_hidratacao_agua,
+        "💧 Hidratação (Água)": page_hidratacao_agua, # Função agora está completa!
         "Relatório de Evolução": page_relatorios
     }
 
