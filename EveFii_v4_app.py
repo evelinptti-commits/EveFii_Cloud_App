@@ -79,7 +79,7 @@ def get_user_profile(user_id):
     conn.close()
     return dict(profile) if profile else None
 
-# 2. Inicialização do Banco de Dados (Com Correção de Migração para v16: SÓDIO)
+# 2. Inicialização do Banco de Dados (Com Correção de Migração para v17: SÓDIO, FIBRA e SINTAXE)
 @st.cache_resource
 def init_db():
     conn = get_conn(); cur = conn.cursor()
@@ -98,7 +98,7 @@ def init_db():
         )
     ''')
     
-    # Tabela de Alimentos (Adicionando FIBRA e SÓDIO)
+    # Tabela de Alimentos (Adicionando FIBRA e SÓDIO) - CORREÇÃO DE SINTAXE AQUI
     cur.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -112,7 +112,7 @@ def init_db():
             fiber REAL,
             sodium REAL 
         )
-    ')
+    ''')
     
     # Tabela de Métricas
     cur.execute('''
@@ -501,6 +501,79 @@ def generate_diet_pdf(username, targets, df_plan, final_totals):
         pdf.cell_utf8(50, 6, str(row['Refeição']), 1, 0, 'L')
         pdf.cell_utf8(90, 6, str(row['Alimento']), 1, 0, 'L')
         pdf.cell_utf8(30, 6, str(row['Gramas']), 1, 1, 'R')
+        
+    return pdf.output(dest='S').encode('latin-1')
+
+def generate_metrics_pdf(username, df_metrics):
+    pdf = PDF('P', 'mm', 'A4')
+    pdf.add_page()
+    
+    pdf.set_font('Arial', 'B', 16)
+    pdf.cell_utf8(0, 10, f'Relatório de Evolução Corporal de {username}', 0, 1)
+    pdf.ln(5)
+
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_font('Arial', 'B', 10)
+    pdf.cell_utf8(20, 7, 'Data', 1, 0, 'C', 1)
+    pdf.cell_utf8(25, 7, 'Peso (kg)', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, '% Gord.', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Gorda', 1, 0, 'C', 1)
+    pdf.cell_utf8(30, 7, 'Massa Magra', 1, 0, 'C', 1)
+    pdf.cell_utf8(20, 7, 'Cintura', 1, 0, 'C', 1)
+    pdf.cell_utf8(15, 7, 'IMC', 1, 1, 'C', 1)
+
+    pdf.set_font('Arial', '', 8)
+    df_metrics_chrono = df_metrics.sort_values(by='date')
+    
+    for index, row in df_metrics_chrono.iterrows():
+        pdf.cell_utf8(20, 6, row['date'].strftime('%d/%m/%Y'), 1, 0, 'C')
+        pdf.cell_utf8(25, 6, f"{row['weight']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['body_fat_perc']:.1f}", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Gorda (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(30, 6, f"{row['Massa Magra (kg)']:.1f} kg", 1, 0, 'R')
+        pdf.cell_utf8(20, 6, f"{row['waist_circ']:.1f} cm", 1, 0, 'R')
+        pdf.cell_utf8(15, 6, f"{row['bmi']:.1f}", 1, 1, 'R')
+        
+    if len(df_metrics_chrono) > 1:
+        first = df_metrics_chrono.iloc[0]
+        last = df_metrics_chrono.iloc[-1]
+        
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell_utf8(0, 10, 'Resumo da Evolução (Total):', 0, 1)
+        
+        def format_diff_pdf(start, end, metric_name, unit):
+            diff = end - start
+            diff_str = f"{'+' if diff > 0 else ''}{diff:.1f} {unit}"
+            if metric_name in ['Peso', '% Gordura', 'Massa Gorda']:
+                color = (0, 100, 0) if diff < 0 else (180, 0, 0)
+            else: 
+                color = (0, 100, 0) if diff > 0 else (180, 0, 0) 
+
+            pdf.set_text_color(*color)
+            pdf.cell_utf8(0, 7, f"De {start:.1f} para {end:.1f} {unit} ({diff_str})", 0, 1)
+            pdf.set_text_color(0, 0, 0) 
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Peso Corporal:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['weight'], last['weight'], 'Peso', 'kg')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, '% Gordura:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['body_fat_perc'], last['body_fat_perc'], '% Gordura', '%')
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Gorda:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Gorda (kg)'], last['Massa Gorda (kg)'], 'Massa Gorda', 'kg')
+
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell_utf8(50, 7, 'Massa Magra:', 0, 0)
+        pdf.set_font('Arial', '', 10)
+        format_diff_pdf(first['Massa Magra (kg)'], last['Massa Magra (kg)'], 'Massa Magra', 'kg')
+
         
     return pdf.output(dest='S').encode('latin-1')
 
