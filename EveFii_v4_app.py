@@ -433,5 +433,3 @@ if __name__ == "__main__":
         main_app()
     else:
         show_login()
-    else:
-        show_login()
