@@ -359,7 +359,8 @@ def run_optimization(targets, meal_foods, meal_names):
     if not optimization_failed:
         df_final = pd.DataFrame(final_plan)
         
-        st.session_state['final_plan_df'] = df_final
+        # Salva o plano BRUTO na sessão. O agrupamento e a exibição serão feitos FORA da função.
+        st.session_state['final_plan_raw_df'] = df_final
         st.session_state['final_totals'] = {
             'cal': int(total_opt_cal), 
             'prot': total_opt_prot, 
@@ -369,65 +370,8 @@ def run_optimization(targets, meal_foods, meal_names):
             'sodium': total_opt_sodium 
         }
         
-        st.subheader("3. Dieta Final Otimizada (Gramas por Refeição)")
-        st.success("✅ Plano detalhado gerado com sucesso!")
-        
-        col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6) 
-        col_c.metric("Calorias Totais", f"{total_opt_cal:.0f} kcal")
-        col_p.metric("Proteína Total", f"{total_opt_prot:.1f} g")
-        col_ca.metric("Carboidratos Total", f"{total_opt_carbs:.1f} g")
-        col_g.metric("Gordura Total", f"{total_opt_fat:.1f} g")
-        col_f.metric("Fibra Total", f"{total_opt_fiber:.1f} g")
-        col_s.metric("Sódio Total", f"{total_opt_sodium:.0f} mg") 
-        
-    # --- INSERINDO O BLOCO DE CORREÇÃO VISUAL E PREPARAÇÃO PARA EDIÇÃO ---
-# 1. Agrupa o resultado da otimização
-df_grouped = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
-# Arredonda e converte para int
-df_grouped['Gramas'] = df_grouped['Gramas'].round(0).astype(int) 
-
-# SALVA O DATAFRAME NA SESSÃO (Necessário para edição e PDF)
-st.session_state['final_plan_df'] = df_grouped
-
-# NOVO BLOCO DE EXIBIÇÃO POR REFEIÇÃO
-st.subheader("3. Plano Alimentar Otimizado")
-st.success("✅ A otimização gerou um plano viável! Role para baixo para a visualização por refeição e para a área de edição.")
-st.markdown("---")
-
-# Pega a ordem das refeições
-refeicoes_ordenadas = df_grouped['Refeição'].unique()
-
-for refeicao in refeicoes_ordenadas:
-    st.markdown(f"#### 🥣 {refeicao}")
-    
-    # Filtra o DataFrame para a refeição atual
-    df_refeicao = df_grouped[df_grouped['Refeição'] == refeicao].set_index('Alimento').copy()
-    
-    # Formata a coluna Gramas apenas para exibição
-    df_refeicao['Quantidade (g)'] = df_refeicao['Gramas'].astype(str) + ' g'
-    
-    # Exibe a tabela
-    st.dataframe(
-        df_refeicao[['Quantidade (g)']],
-        hide_index=False,
-        use_container_width=True,
-    )
-    
-st.markdown("---")
-
-# Atualiza o botão de download para usar o df_grouped (final_plan_df)
-col_pdf, _ = st.columns([0.4, 0.6])
-with col_pdf:
-    st.download_button(
-        label="Exportar Dieta para PDF",
-        # Passa o DataFrame salvo na sessão:
-        data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
-        file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
-        mime="application/pdf",
-        type="primary"
-    )
-
-# -------------------------------------------------------------------------
+        # Removido o código de exibição de totais daqui.
+        # Ele será exibido na função principal (Bloco 2), após o agrupamento de dados.
 
 # --- Funções de Métricas Corporais ---
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
@@ -619,79 +563,6 @@ def generate_metrics_pdf(username, df_metrics):
         
     return pdf.output(dest='S').encode('latin-1')
 
-def generate_metrics_pdf(username, df_metrics):
-    pdf = PDF('P', 'mm', 'A4')
-    pdf.add_page()
-    
-    pdf.set_font('Arial', 'B', 16)
-    pdf.cell_utf8(0, 10, f'Relatório de Evolução Corporal de {username}', 0, 1)
-    pdf.ln(5)
-
-    pdf.set_fill_color(220, 220, 220)
-    pdf.set_font('Arial', 'B', 10)
-    pdf.cell_utf8(20, 7, 'Data', 1, 0, 'C', 1)
-    pdf.cell_utf8(25, 7, 'Peso (kg)', 1, 0, 'C', 1)
-    pdf.cell_utf8(20, 7, '% Gord.', 1, 0, 'C', 1)
-    pdf.cell_utf8(30, 7, 'Massa Gorda', 1, 0, 'C', 1)
-    pdf.cell_utf8(30, 7, 'Massa Magra', 1, 0, 'C', 1)
-    pdf.cell_utf8(20, 7, 'Cintura', 1, 0, 'C', 1)
-    pdf.cell_utf8(15, 7, 'IMC', 1, 1, 'C', 1)
-
-    pdf.set_font('Arial', '', 8)
-    df_metrics_chrono = df_metrics.sort_values(by='date')
-    
-    for index, row in df_metrics_chrono.iterrows():
-        pdf.cell_utf8(20, 6, row['date'].strftime('%d/%m/%Y'), 1, 0, 'C')
-        pdf.cell_utf8(25, 6, f"{row['weight']:.1f}", 1, 0, 'R')
-        pdf.cell_utf8(20, 6, f"{row['body_fat_perc']:.1f}", 1, 0, 'R')
-        pdf.cell_utf8(30, 6, f"{row['Massa Gorda (kg)']:.1f} kg", 1, 0, 'R')
-        pdf.cell_utf8(30, 6, f"{row['Massa Magra (kg)']:.1f} kg", 1, 0, 'R')
-        pdf.cell_utf8(20, 6, f"{row['waist_circ']:.1f} cm", 1, 0, 'R')
-        pdf.cell_utf8(15, 6, f"{row['bmi']:.1f}", 1, 1, 'R')
-        
-    if len(df_metrics_chrono) > 1:
-        first = df_metrics_chrono.iloc[0]
-        last = df_metrics_chrono.iloc[-1]
-        
-        pdf.ln(5)
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell_utf8(0, 10, 'Resumo da Evolução (Total):', 0, 1)
-        
-        def format_diff_pdf(start, end, metric_name, unit):
-            diff = end - start
-            diff_str = f"{'+' if diff > 0 else ''}{diff:.1f} {unit}"
-            if metric_name in ['Peso', '% Gordura', 'Massa Gorda']:
-                color = (0, 100, 0) if diff < 0 else (180, 0, 0)
-            else: 
-                color = (0, 100, 0) if diff > 0 else (180, 0, 0) 
-
-            pdf.set_text_color(*color)
-            pdf.cell_utf8(0, 7, f"De {start:.1f} para {end:.1f} {unit} ({diff_str})", 0, 1)
-            pdf.set_text_color(0, 0, 0) 
-        
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell_utf8(50, 7, 'Peso Corporal:', 0, 0)
-        pdf.set_font('Arial', '', 10)
-        format_diff_pdf(first['weight'], last['weight'], 'Peso', 'kg')
-        
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell_utf8(50, 7, '% Gordura:', 0, 0)
-        pdf.set_font('Arial', '', 10)
-        format_diff_pdf(first['body_fat_perc'], last['body_fat_perc'], '% Gordura', '%')
-        
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell_utf8(50, 7, 'Massa Gorda:', 0, 0)
-        pdf.set_font('Arial', '', 10)
-        format_diff_pdf(first['Massa Gorda (kg)'], last['Massa Gorda (kg)'], 'Massa Gorda', 'kg')
-
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell_utf8(50, 7, 'Massa Magra:', 0, 0)
-        pdf.set_font('Arial', '', 10)
-        format_diff_pdf(first['Massa Magra (kg)'], last['Massa Magra (kg)'], 'Massa Magra', 'kg')
-
-        
-    return pdf.output(dest='S').encode('latin-1')
-
 # --- Funções Específicas da V17 (Hidratação) ---
 
 def calculate_water_goal(weight_kg, age_years):
@@ -807,25 +678,70 @@ def page_planejador_inteligente():
         
         st.markdown("---")
         if st.button("Gerar Dieta Final em Gramas", type="primary"):
+            # Linha de chamada da otimização
             run_optimization(targets, st.session_state['meal_foods'], st.session_state['meal_names'])
             
-    if 'final_plan_df' in st.session_state and 'final_totals' in st.session_state:
+    # --- INÍCIO DO BLOCO 2: Exibição Agrupada e Download (Correção de Localização) ---
+    if 'final_plan_raw_df' in st.session_state and 'final_totals' in st.session_state:
+        df_final = st.session_state['final_plan_raw_df']
+        targets = st.session_state['targets'] # Obtém as metas para o PDF
+
         st.markdown("---")
-        st.subheader("Download da Dieta Gerada")
+        st.subheader("3. Dieta Final Otimizada (Gramas por Refeição)")
+        st.success("✅ A otimização gerou um plano viável! Role para baixo para a visualização por refeição e para a área de edição.")
+        
+        # Exibe os totais (movido de run_optimization)
+        finals = st.session_state['final_totals']
+        col_c, col_p, col_ca, col_g, col_f, col_s = st.columns(6) 
+        col_c.metric("Calorias Totais", f"{finals['cal']:.0f} kcal")
+        col_p.metric("Proteína Total", f"{finals['prot']:.1f} g")
+        col_ca.metric("Carboidratos Total", f"{finals['carbs']:.1f} g")
+        col_g.metric("Gordura Total", f"{finals['fat']:.1f} g")
+        col_f.metric("Fibra Total", f"{finals['fiber']:.1f} g")
+        col_s.metric("Sódio Total", f"{finals['sodium']:.0f} mg") 
+        st.markdown("---")
+        
+        # 1. Agrupa o resultado da otimização
+        df_grouped = df_final.groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index()
+        # Arredonda e converte para int
+        df_grouped['Gramas'] = df_grouped['Gramas'].round(0).astype(int) 
+
+        # SALVA O DATAFRAME AGRUPADO FINAL NA SESSÃO (Para ser usado no editor futuro/PDF)
+        st.session_state['final_plan_df'] = df_grouped
+
+        # NOVO BLOCO DE EXIBIÇÃO POR REFEIÇÃO
+        refeicoes_ordenadas = df_grouped['Refeição'].unique()
+
+        for refeicao in refeicoes_ordenadas:
+            st.markdown(f"#### 🥣 {refeicao}")
+            
+            # Filtra o DataFrame para a refeição atual
+            df_refeicao = df_grouped[df_grouped['Refeição'] == refeicao].set_index('Alimento').copy()
+            
+            # Formata a coluna Gramas apenas para exibição
+            df_refeicao['Quantidade (g)'] = df_refeicao['Gramas'].astype(str) + ' g'
+            
+            # Exibe a tabela
+            st.dataframe(
+                df_refeicao[['Quantidade (g)']],
+                hide_index=False,
+                use_container_width=True,
+            )
+            
+        st.markdown("---")
+
+        # Atualiza o botão de download para usar o df_grouped (final_plan_df)
         col_pdf, _ = st.columns([0.4, 0.6])
         with col_pdf:
             st.download_button(
                 label="Exportar Dieta para PDF",
-                data=generate_diet_pdf(
-                    st.session_state['username'], 
-                    st.session_state['targets'], 
-                    st.session_state['final_plan_df'].groupby(['Refeição', 'Alimento'])['Gramas'].sum().reset_index(),
-                    st.session_state['final_totals']
-                ),
+                # Passa o DataFrame salvo na sessão:
+                data=generate_diet_pdf(st.session_state['username'], targets, st.session_state['final_plan_df'], st.session_state['final_totals']),
                 file_name=f"Dieta_EveFii_{st.session_state['username']}_{datetime.now().strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 type="primary"
             )
+    # --- FIM DO BLOCO 2 ---
             
 def page_hidratacao_agua():
     user_id = st.session_state['user_id']
@@ -1367,6 +1283,7 @@ def main_app():
         st.session_state.pop('user_id', None)
         st.session_state.pop('targets', None)
         st.session_state.pop('final_plan_df', None)
+        st.session_state.pop('final_plan_raw_df', None) # Limpa a nova chave
         st.session_state.pop('final_totals', None)
         st.rerun()
 
