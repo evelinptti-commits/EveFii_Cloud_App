@@ -79,7 +79,7 @@ def get_user_profile(user_id):
     conn.close()
     return dict(profile) if profile else None
 
-# 2. Inicialização do Banco de Dados (Com Correção de Migração para v17: SÓDIO, FIBRA e SINTAXE)
+# 2. Inicialização do Banco de Dados (Com Correção de Sintaxe na Tabela Recipes)
 @st.cache_resource
 def init_db():
     conn = get_conn(); cur = conn.cursor()
@@ -112,7 +112,7 @@ def init_db():
             fiber REAL,
             sodium REAL 
         )
-    ')''')
+    ''') # <--- CORREÇÃO: Removido o ')' extra que estava causando o erro
     
     # Tabela de Métricas
     cur.execute('''
@@ -1097,7 +1097,7 @@ def page_relatorios():
                 
                 try:
                     with photo_cols[i % 5]:
-                        st.image(file_path, caption=row['date'].strftime('%d/%m/%Y'), use_column_width=True)
+                        st.image(file_path, caption=row['date'].strftime('%d/%m/%Y'), use_container_width=True)
                 except Exception:
                     with photo_cols[i % 5]:
                         st.warning("Foto não disponível (Path Incorreto ou Restrito)")
