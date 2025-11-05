@@ -1,4 +1,4 @@
-# EveFii_v9_app.py - Versão FINAL (Cálculo JP7 e Naval de Composição Corporal)
+# EveFii_v10_app.py - Versão FINAL (Composição Corporal e Correção de Banco de Dados)
 
 # Imports
 import streamlit as st
@@ -30,14 +30,14 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
-# 2. Inicialização do Banco de Dados 
+# 2. Inicialização do Banco de Dados (Com Correção de Migração)
 @st.cache_resource
 def init_db():
     conn = get_conn(); cur = conn.cursor()
     
     cur.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT)')
     
-    # Tabela de Alimentos (Nutrientes para 100g)
+    # Tabela de Alimentos
     cur.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -50,7 +50,7 @@ def init_db():
         )
     ''')
     
-    # Tabela de Métricas Corporais: Armazena o % de gordura calculado e IMC
+    # Tabela de Métricas Corporais (inclui BMI para o caso de ser a primeira criação)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS body_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -62,6 +62,14 @@ def init_db():
         )
     ''')
     
+    # --- CORREÇÃO DE MIGRAÇÃO: Adicionar BMI se a coluna estiver faltando ---
+    try:
+        # Tenta selecionar a coluna BMI
+        cur.execute("SELECT bmi FROM body_metrics LIMIT 1")
+    except sqlite3.OperationalError:
+        # Se a coluna não existir (erro anterior), adiciona
+        cur.execute("ALTER TABLE body_metrics ADD COLUMN bmi REAL")
+        
     # Adiciona usuário padrão se o banco estiver vazio
     cur.execute("SELECT COUNT(*) FROM users"); c = cur.fetchone()[0]
     if c == 0:
@@ -133,9 +141,9 @@ def delete_food(food_id):
     finally:
         conn.close()
         
-# 5. Funções de Métricas Corporais (NOVA SEÇÃO COM JP7)
+# 5. Funções de Métricas Corporais (Cálculos de Composição Corporal)
 
-# FÓRMULA NAVY (U.S. Navy Body Fat Formula - Circunferências)
+# FÓRMULA NAVAL (U.S. Navy Body Fat Formula - Circunferências)
 def calculate_body_fat_navy(gender, height, neck, waist, hip=0):
     # Converte cm para polegadas (1 cm = 0.3937 polegadas)
     h_in = height * 0.3937
@@ -159,7 +167,7 @@ def calculate_body_fat_jp7(gender, age, sk_chest, sk_triceps, sk_subscap, sk_mid
     # Todos os inputs em mm
     S7SKF = sk_chest + sk_triceps + sk_subscap + sk_midax + sk_supra + sk_abdomen + sk_thigh
     
-    if S7SKF <= 0: return 5.0 # Previne divisão por zero ou logaritmo de zero
+    if S7SKF <= 0: return 5.0 
     
     try:
         if gender == 'Masculino':
@@ -173,7 +181,7 @@ def calculate_body_fat_jp7(gender, age, sk_chest, sk_triceps, sk_subscap, sk_mid
         bf = (495 / DB) - 450
         
     except Exception:
-        bf = 5.0 # Caso ocorra algum erro de cálculo
+        bf = 5.0 
 
     return max(5.0, min(50.0, bf))
 
@@ -197,20 +205,21 @@ def save_body_metric(date, weight, body_fat_perc, waist_circ, bmi):
 
 def get_body_metrics():
     conn = get_conn(); 
+    # A query agora está segura devido à correção de migração no init_db
     metrics = pd.read_sql("SELECT date, weight, body_fat_perc, waist_circ, bmi FROM body_metrics ORDER BY date DESC", conn)
     conn.close()
     
     if metrics.empty:
         return metrics
         
-    # Cálculo da Massa Gorda (MG) e Massa Magra (MM)
+    # Cálculo da Massa Gorda (Peso Gordo) e Massa Magra (Peso Magro)
     metrics['date'] = pd.to_datetime(metrics['date'])
     metrics['Massa Gorda (kg)'] = metrics['weight'] * (metrics['body_fat_perc'] / 100)
     metrics['Massa Magra (kg)'] = metrics['weight'] - metrics['Massa Gorda (kg)']
     
     return metrics
 
-# --- Funções de Planejador e Receitas (Inalteradas, exceto pela inclusão do código completo) ---
+# --- Funções de Planejador e Receitas (Inalteradas) ---
 
 def calculate_smart_macros(gender, weight, height, age, activity_level_factor, goal):
     if gender == 'Masculino':
@@ -471,7 +480,7 @@ def page_receitas():
 
 def page_avaliacao_fisica():
     st.header("🏋️ Avaliação Física e Composição Corporal")
-    st.info("Use dobras cutâneas ou circunferências para calcular o % de Gordura e monitorar sua Massa Magra/Gorda.")
+    st.info("Use dobras cutâneas (JP7) ou circunferências (Naval) para calcular o % de Gordura e monitorar sua Massa Magra/Gorda.")
     
     # --- 1. Formulário de Cálculo e Cadastro de Métrica ---
     st.subheader("Registrar Nova Métrica")
@@ -511,14 +520,22 @@ def page_avaliacao_fisica():
         with col_medidas:
             st.markdown("##### Medidas Requeridas (cm ou mm)")
             
+            # Inicializa variáveis para o escopo do formulário, com base no método
+            waist = initial_values['waist']
+            hip = 0.0
+            neck = 0.0
+
             if calc_method == 'Circunferências (Naval)':
                 st.info("Medidas em **cm**. Utilize fita métrica.")
                 neck = st.number_input("Pescoço (cm)", min_value=25.0, format="%.1f", value=initial_values['neck'])
                 waist = st.number_input("Cintura (cm)", min_value=50.0, format="%.1f", value=initial_values['waist'])
-                hip = st.number_input("Quadril (cm) - Apenas para Mulheres", min_value=70.0 if gender == 'Feminino' else 0.0, format="%.1f", value=initial_values['hip'] if gender == 'Feminino' else 0.0)
+                if gender == 'Feminino':
+                    hip = st.number_input("Quadril (cm)", min_value=70.0, format="%.1f", value=initial_values['hip'])
                 
                 if gender == 'Masculino' and waist <= neck:
                     st.error("Para o cálculo Naval (Homens), a Cintura deve ser maior que o Pescoço.")
+                
+                sk_chest = sk_triceps = sk_subscap = sk_midax = sk_supra = sk_abdomen = sk_thigh = 0.0
 
             else: # Dobras Cutâneas (Jackson/Pollock 7)
                 st.info("Medidas em **mm**. Utilize um adipômetro (dobras cutâneas).")
@@ -535,14 +552,22 @@ def page_avaliacao_fisica():
                 sk_abdomen = sk_col3.number_input("Abdominal (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_abdomen'])
                 sk_thigh = sk_col3.number_input("Coxa (mm)", min_value=1.0, format="%.1f", value=initial_values['sk_thigh'])
                 
-                waist = initial_values['waist'] # Manter a variável waist (cintura) com valor padrão para salvar no banco
-                hip = 0.0
-                neck = 0.0
+                # Apenas cintura é salva no BD, mesmo que não usada no cálculo JP7
+                waist = st.number_input("Cintura (cm) - Opcional para Histórico", min_value=50.0, format="%.1f", value=initial_values['waist'])
+
 
         st.markdown("---")
         
         col_calc, col_save = st.columns(2)
         
+        # --- Lógica de Cálculo ---
+        if 'calculated_bf' in st.session_state and st.session_state.get('last_method') == calc_method:
+            pass # Mantém o estado para a seção de salvamento
+        else:
+            st.session_state.pop('calculated_bf', None)
+            st.session_state.pop('waist_circ_save', None)
+            st.session_state.pop('bmi_save', None)
+            
         with col_calc:
             if st.form_submit_button("Calcular Composição Corporal", type="secondary"):
                 bmi_val = calculate_bmi(weight, height)
@@ -555,7 +580,8 @@ def page_avaliacao_fisica():
                 st.session_state['calculated_bf'] = calculated_bf
                 st.session_state['waist_circ_save'] = waist
                 st.session_state['bmi_save'] = bmi_val
-                st.rerun() # Recarregar para exibir os resultados na seção de salvamento
+                st.session_state['last_method'] = calc_method
+                st.rerun() 
                 
         with col_save:
             if 'calculated_bf' in st.session_state:
@@ -565,12 +591,12 @@ def page_avaliacao_fisica():
                 mm_val = weight - mg_val
                 
                 st.markdown("##### Resultados Calculados:")
-                st.metric("Índice de Massa Corporal (IMC)", f"{bmi_val:.1f}")
-                st.metric("% Gordura Calculada", f"{bf_val:.1f} %")
+                st.metric("IMC", f"{bmi_val:.1f}")
+                st.metric("% Gordura", f"{bf_val:.1f} %")
                 st.metric("Massa Gorda", f"{mg_val:.1f} kg")
                 st.metric("Massa Magra", f"{mm_val:.1f} kg")
                 
-                # Cálculo de Risco Cintura-Quadril (somente se houver quadril)
+                # Cálculo de Risco Cintura-Quadril (somente se houver quadril na medição Naval)
                 if gender == 'Feminino' and calc_method == 'Circunferências (Naval)' and hip > 0:
                      whr = waist / hip
                      whr_risk = "Baixo"
@@ -587,6 +613,7 @@ def page_avaliacao_fisica():
                         del st.session_state['calculated_bf']
                         del st.session_state['waist_circ_save']
                         del st.session_state['bmi_save']
+                        st.session_state.pop('last_method', None)
                         st.rerun()
                     else:
                         st.error("Erro ao salvar métrica.")
@@ -663,7 +690,7 @@ def main_app():
         "Relatórios": page_relatorios
     }
 
-    st.sidebar.title("EveFii v9 Completo (Nutrição)")
+    st.sidebar.title("EveFii v10 Completo (Nutrição)")
     selection = st.sidebar.radio("Navegação", list(PAGES.keys()))
     
     st.sidebar.markdown("---")
@@ -675,7 +702,7 @@ def main_app():
     PAGES[selection]()
 
 def show_login():
-    st.title("EveFii v9 — Focado em Nutrição")
+    st.title("EveFii v10 — Focado em Nutrição")
     st.subheader("Faça Login para Continuar")
     
     with st.form("login_form"):
@@ -695,7 +722,7 @@ def show_login():
 
 if __name__ == "__main__":
     
-    st.set_page_config(page_title="EveFii v9 Nutrição", layout="wide")
+    st.set_page_config(page_title="EveFii v10 Nutrição", layout="wide")
     
     init_db()
     
